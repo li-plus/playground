@@ -113,6 +113,9 @@ __global__ void sgemm4_kernel(int M, int N, int K, const float *__restrict__ A, 
     constexpr int B_NUM_THREADS_X = BLOCK_SIZE_N / 4;
     constexpr int B_NUM_THREADS_Y = NUM_THREADS / B_NUM_THREADS_X;
 
+    static_assert(A_NUM_THREADS_Y <= BLOCK_SIZE_M);
+    static_assert(B_NUM_THREADS_Y <= BLOCK_SIZE_K);
+
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
     const int tid = ty * NUM_THREADS_X + tx;
