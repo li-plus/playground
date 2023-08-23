@@ -1,15 +1,3 @@
-# GeMM Lab
+# Playground
 
-Compile:
-
-```sh
-mkdir -p build && cd build
-cmake ..
-make -j
-```
-
-Run benchmark:
-
-```sh
-./bin/gemm_bench
-```
+My sandbox for learning new technologies and skills.
