@@ -26,6 +26,8 @@ set(CUDA_NVCC_FLAGS_RELEASE "${CUDA_NVCC_FLAGS_RELEASE} -DNDEBUG -O3 --use_fast_
 
 add_subdirectory(src)
 
+cuda_add_executable(helloworld helloworld.cu)
+
 # clang-format
 file(GLOB_RECURSE SOURCES src/*.cpp src/*.h src/*.cu src/*.cuh)
 add_custom_target(format COMMAND clang-format -i ${SOURCES})
