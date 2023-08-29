@@ -18,10 +18,6 @@ static void ref_add(float *A, float *B, float *C, int N) {
     }
 }
 
-static inline bool is_close(float a, float b, float atol = 1e-5f, float rtol = 0.f) {
-    return std::abs(a - b) < atol + rtol * std::abs(b);
-}
-
 int main() {
     constexpr size_t MB = 1024ull * 1024ull;
     constexpr size_t GB = 1024ull * MB;
@@ -68,9 +64,9 @@ int main() {
     auto fn = [=] { launch_add(dA, dB, dC, N); };
     float elapsed_ms = timeit(fn, 2, 10);
     float bw_peak = 900; // V100 900GB/s
-    float bw_actual = 3 * N * sizeof(float) / GB / (elapsed_ms / 1000);
+    float bw_actual = 3 * N * sizeof(float) / (float) GB / (elapsed_ms / 1000);
     float bw_util = bw_actual / bw_peak;
-    printf("elapsed %.3f ms, bandwidth %.3f GB/s out of peak %.3f GB/s (%.3f%%)\n", elapsed_ms, bw_actual, bw_peak,
+    printf("elapsed %.3f ms, bandwidth %.3f GB/s / peak %.3f GB/s (%.3f%%)\n", elapsed_ms, bw_actual, bw_peak,
            bw_util * 100);
 
     CHECK_CUDA(cudaFree(dA));

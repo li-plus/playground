@@ -28,6 +28,9 @@ add_subdirectory(src)
 
 cuda_add_executable(helloworld helloworld.cu)
 
+cuda_add_executable(gemv gemv.cu)
+target_link_libraries(gemv cublas)
+
 # clang-format
 file(GLOB_RECURSE SOURCES src/*.cpp src/*.h src/*.cu src/*.cuh)
 add_custom_target(format COMMAND clang-format -i ${SOURCES})
