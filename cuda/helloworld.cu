@@ -3,13 +3,33 @@
 
 __global__ void add(float *A, float *B, float *C, int N) {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= N) {
+        return;
+    }
     C[i] = A[i] + B[i];
+}
+
+__global__ void add_2(float *A, float *B, float *C, int N) {
+    int i = 4 * (blockDim.x * blockIdx.x + threadIdx.x);
+    if (i >= N) {
+        return;
+    }
+    float4 a4 = *(float4 *)&A[i];
+    float4 b4 = *(float4 *)&B[i];
+    float4 c4 = make_float4(a4.x + b4.x, a4.y + b4.y, a4.z + b4.z, a4.w + b4.w);
+    *(float4 *)&C[i] = c4;
 }
 
 static void launch_add(float *A, float *B, float *C, int N) {
     constexpr int num_threads = 1024;
     const int num_blocks = N / num_threads;
     add<<<num_blocks, num_threads>>>(A, B, C, N);
+}
+
+static void launch_add_2(float *A, float *B, float *C, int N) {
+    constexpr int num_threads = 1024;
+    const int num_blocks = N / num_threads / 4;
+    add_2<<<num_blocks, num_threads>>>(A, B, C, N);
 }
 
 static void ref_add(float *A, float *B, float *C, int N) {
