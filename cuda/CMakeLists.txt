@@ -18,18 +18,19 @@ set(CMAKE_CUDA_ARCHITECTURES 70 75)
 
 option(PTX_VERBOSE "" OFF)
 if (PTX_VERBOSE)
-    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} --ptxas-options=-v")
+    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -Xptxas=-v")
 endif ()
 set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75")
 set(CUDA_NVCC_FLAGS_DEBUG "${CUDA_NVCC_FLAGS_DEBUG} -G")
 set(CUDA_NVCC_FLAGS_RELEASE "${CUDA_NVCC_FLAGS_RELEASE} -DNDEBUG -O3 --use_fast_math")
 
-add_subdirectory(src)
-
-cuda_add_executable(helloworld helloworld.cu)
+cuda_add_executable(add add.cu)
 
 cuda_add_executable(gemv gemv.cu)
 target_link_libraries(gemv cublas)
+
+cuda_add_executable(gemm gemm.cu)
+target_link_libraries(gemm cublas)
 
 # clang-format
 file(GLOB_RECURSE SOURCES src/*.cpp src/*.h src/*.cu src/*.cuh)

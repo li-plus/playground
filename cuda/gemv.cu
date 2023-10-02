@@ -5,6 +5,7 @@
 #include "common.h"
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
+#include <functional>
 #include <string>
 
 #define WARP_SIZE 32
@@ -183,7 +184,7 @@ int main() {
                                          ref_sgemv(cublas_handle, A, x, y, M, N);
                                      }}};
 
-    constexpr float bw_peak = 900; // V100 900GB/s
+    constexpr float bw_peak = V100SXM2Spec::PEAK_MEM_BW;
     constexpr float total_mem = (M * N + M + N) * sizeof(float) / (float)GB;
     for (const auto &kernel : benchmark_kernels) {
         auto fn = [=] { kernel.fn(dA, dx, out_dy, M, N); };

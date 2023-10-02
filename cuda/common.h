@@ -1,9 +1,24 @@
 #pragma once
 
-#include <cuda_runtime.h>
-#include <functional>
-#include <stdio.h>
 #include <cublas_v2.h>
+#include <cuda_runtime.h>
+#include <sstream>
+#include <stdio.h>
+
+class LogMessageFatal {
+  public:
+    LogMessageFatal(const char *file, int line) { oss_ << file << ':' << line << ' '; }
+    [[noreturn]] ~LogMessageFatal() noexcept(false) { throw std::runtime_error(oss_.str()); }
+    std::ostringstream &stream() { return oss_; }
+
+  private:
+    std::ostringstream oss_;
+};
+
+#define THROW LogMessageFatal(__FILE__, __LINE__).stream()
+#define CHECK(cond)                                                                                                    \
+    if (!(cond))                                                                                                       \
+    THROW << "check failed (" #cond ") "
 
 #define CHECK_CUDA(status) check_cuda_status((status), __FILE__, __LINE__)
 
@@ -29,7 +44,8 @@ static inline float uniform() { return (float)rand() / RAND_MAX; }
 
 static inline float uniform(float lo, float hi) { return uniform() * (hi - lo) + lo; }
 
-static inline float timeit(std::function<void()> fn, int warmup, int active) {
+template <typename Fn>
+static inline float timeit(Fn fn, int warmup, int active) {
     float elapsed_ms;
     for (int i = 0; i < warmup; i++) {
         fn();
@@ -55,6 +71,14 @@ static inline bool is_close(float a, float b, float atol = 1e-5f, float rtol = 1
     return std::abs(a - b) < atol + rtol * std::abs(b);
 }
 
+static inline int ceil_div(int a, int b) { return (a + b - 1) / b; }
+
 static constexpr size_t KB = 1024;
 static constexpr size_t MB = 1024ull * KB;
 static constexpr size_t GB = 1024ull * MB;
+
+struct V100SXM2Spec {
+    static constexpr float PEAK_MEM_BW = 900; // GB/s
+    static constexpr float PEAK_FP32_TFLOPS = 15.7;
+    static constexpr float PEAK_FP16_TFLOPS = 125;
+};
