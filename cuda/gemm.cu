@@ -1,3 +1,5 @@
+// tutorial: https://siboehm.com/articles/22/CUDA-MMM
+
 #include "common.h"
 #include <functional>
 #include <iostream>
@@ -75,7 +77,8 @@ template <int BM, int BN, int BK, int TM, int TN, int TK>
 __global__ void __launch_bounds__((BM / TM) * (BN / TN))
     sgemm_3_kernel(int M, int N, int K, const float *__restrict__ A, const float *__restrict__ B,
                    float *__restrict__ C) {
-    static_assert(TM % 4 == 0 && TN % 4 == 0 && TK % 4 == 0); // float4
+    static_assert(TM % 4 == 0 && TN % 4 == 0); // float4
+    static_assert(TK == 1 || TK == 2 || TK % 4 == 0);
 
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
@@ -142,9 +145,15 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
             // each thread loads pAs[0:TM][0:TK] into Areg
 #pragma unroll
             for (int tm = 0; tm < TM; tm++) {
+                if constexpr (TK == 1) {
+                    Areg[tm * TK] = pAs[tm * BK];
+                } else if constexpr (TK == 2) {
+                    *(float2 *)&Areg[tm * TK] = *(float2 *)&pAs[tm * BK];
+                } else {
 #pragma unroll
-                for (int tk = 0; tk < TK; tk += 4) {
-                    *(float4 *)&Areg[tm * TK + tk] = *(float4 *)&pAs[tm * BK + tk];
+                    for (int tk = 0; tk < TK; tk += 4) {
+                        *(float4 *)&Areg[tm * TK + tk] = *(float4 *)&pAs[tm * BK + tk];
+                    }
                 }
             }
             // each thread loads pBs[0:TK][0:TN] into Breg and compute matmul
@@ -154,11 +163,8 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
                 for (int tn = 0; tn < TN; tn += 4) {
                     float4 Breg = *(float4 *)&pBs[tk * BN + tn];
 #pragma unroll
-                    for (int tm = 0; tm < TM; tm += 4) {
-                        *(float4 *)&sums[(tm + 0) * TN + tn] += Breg * Areg[(tm + 0) * TK + tk];
-                        *(float4 *)&sums[(tm + 1) * TN + tn] += Breg * Areg[(tm + 1) * TK + tk];
-                        *(float4 *)&sums[(tm + 2) * TN + tn] += Breg * Areg[(tm + 2) * TK + tk];
-                        *(float4 *)&sums[(tm + 3) * TN + tn] += Breg * Areg[(tm + 3) * TK + tk];
+                    for (int tm = 0; tm < TM; tm++) {
+                        *(float4 *)&sums[tm * TN + tn] += Breg * Areg[tm * TK + tk];
                     }
                 }
             }
@@ -263,10 +269,13 @@ void perf(int M, int N, int K) {
     ADD_SGEMM3_TM(4, TK);                                                                                              \
     ADD_SGEMM3_TM(8, TK)
 #define ADD_SGEMM3_ALL                                                                                                 \
+    ADD_SGEMM3_TN(1);                                                                                                  \
+    ADD_SGEMM3_TN(2);                                                                                                  \
     ADD_SGEMM3_TN(4);                                                                                                  \
     ADD_SGEMM3_TN(8)
 
-    ADD_SGEMM3_ALL;
+    // ADD_SGEMM3_ALL;
+    ADD_SGEMM3(32, 32, 32, 4, 4, 4);
 
     printf("----- M=%d N=%d K=%d -----\n", M, N, K);
 
@@ -355,9 +364,28 @@ void perf(int M, int N, int K) {
 }
 
 int main(int argc, char **argv) {
-    int dims[]{128, 256, 512, 1024, 2048, 4096};
-    for (int d : dims) {
-        perf(d, d, d);
+    // both square
+    {
+        int dims[]{128, 256, 512, 1024, 2048, 4096};
+        for (int d : dims) {
+            perf(d, d, d);
+        }
     }
+
+    // non-square
+    {
+        int dims[]{512, 1024, 2048};
+        for (int M : dims) {
+            for (int N : dims) {
+                for (int K : dims) {
+                    if (M == N && N == K) {
+                        continue;
+                    }
+                    perf(M, N, K);
+                }
+            }
+        }
+    }
+
     return 0;
 }
