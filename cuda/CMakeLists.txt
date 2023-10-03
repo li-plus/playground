@@ -1,20 +1,19 @@
 cmake_minimum_required(VERSION 3.12)
-project(gemm_lab)
+project(CUDA_LAB LANGUAGES CXX CUDA)
 
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib CACHE STRING "")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib CACHE STRING "")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin CACHE STRING "")
 
-set(CMAKE_CXX_STANDARD 14)
-
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif ()
 
-# CUDA
-enable_language(CUDA)
 find_package(CUDA REQUIRED)
 set(CMAKE_CUDA_ARCHITECTURES 70 75)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 17)
 
 option(PTX_VERBOSE "" OFF)
 if (PTX_VERBOSE)
@@ -24,13 +23,13 @@ set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -gencode arch=compute_70,code=sm_70 -gen
 set(CUDA_NVCC_FLAGS_DEBUG "${CUDA_NVCC_FLAGS_DEBUG} -G")
 set(CUDA_NVCC_FLAGS_RELEASE "${CUDA_NVCC_FLAGS_RELEASE} -DNDEBUG -O3 --use_fast_math")
 
-cuda_add_executable(add add.cu)
+add_executable(add add.cu)
 
-cuda_add_executable(gemv gemv.cu)
-target_link_libraries(gemv cublas)
+add_executable(gemv gemv.cu)
+target_link_libraries(gemv ${CUDA_CUBLAS_LIBRARIES})
 
-cuda_add_executable(gemm gemm.cu)
-target_link_libraries(gemm cublas)
+add_executable(gemm gemm.cu)
+target_link_libraries(gemm ${CUDA_CUBLAS_LIBRARIES})
 
 # clang-format
 file(GLOB_RECURSE SOURCES src/*.cpp src/*.h src/*.cu src/*.cuh)
