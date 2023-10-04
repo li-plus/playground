@@ -77,7 +77,7 @@ template <int BM, int BN, int BK, int TM, int TN, int TK>
 __global__ void __launch_bounds__((BM / TM) * (BN / TN))
     sgemm_3_kernel(int M, int N, int K, const float *__restrict__ A, const float *__restrict__ B,
                    float *__restrict__ C) {
-    static_assert(TM % 4 == 0 && TN % 4 == 0); // float4
+    static_assert(TN % 4 == 0); // float4
     static_assert(TK == 1 || TK == 2 || TK % 4 == 0);
 
     const int tx = threadIdx.x;
@@ -99,18 +99,15 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
     constexpr int NUM_THREADS = (BM / TM) * (BN / TN);
 
     // constants for loading A/B from global memory into shared memory
-    static_assert((NUM_THREADS * 4) % BK == 0 || BK % (NUM_THREADS * 4));
+    static_assert((BM * BK) % (NUM_THREADS * 4) == 0);
     constexpr int A_LOAD_TILE_Y = (NUM_THREADS * 4 < BK) ? 1 : NUM_THREADS * 4 / BK;
     constexpr int A_LOAD_TILE_X = (NUM_THREADS * 4 < BK) ? NUM_THREADS * 4 : BK;
-    static_assert(BM % A_LOAD_TILE_Y == 0);
     const int A_y_offset = tid * 4 / BK;
     const int A_x_offset = tid * 4 % BK;
 
-    // static_assert((BK * BN) % (NUM_THREADS * 4) == 0);
-    static_assert((NUM_THREADS * 4) % BN == 0 || BN % (NUM_THREADS * 4) == 0);
+    static_assert((BK * BN) % (NUM_THREADS * 4) == 0);
     constexpr int B_LOAD_TILE_Y = (NUM_THREADS * 4 < BN) ? 1 : NUM_THREADS * 4 / BN;
     constexpr int B_LOAD_TILE_X = (NUM_THREADS * 4 < BN) ? NUM_THREADS * 4 : BN;
-    static_assert(BK % B_LOAD_TILE_Y == 0);
     const int B_y_offset = tid * 4 / BN;
     const int B_x_offset = tid * 4 % BN;
 
@@ -242,40 +239,51 @@ void perf(int M, int N, int K) {
         };
 
 #define ADD_KERNEL(stmt) kernels.emplace_back(#stmt, (stmt))
+
 #define ADD_SGEMM3(BM, BN, BK, TM, TN, TK)                                                                             \
     do {                                                                                                               \
+        constexpr int NUM_THREADS = (BM) / (TM) * (BN) / (TN);                                                         \
         if constexpr (!(((BN) == 128 && (BK) == 128) || ((BM) == 128 && (BK) == 128) ||                                \
-                        ((BM) == 64 && (BN) == 64 && (BK) == 128) || ((BM) == 128 && (BN) == 128 && (BK) == 64) ||     \
-                        ((BM) / (TM) * (BN) / (TN) < 32))) {                                                           \
-            ADD_KERNEL((sgemm_3<(BM), (BN), (BK), (TM), (TN), (TK)>));                                                 \
+                        ((BM) == 64 && (BN) == 64 && (BK) == 128) || ((BM) == 128 && (BN) == 128 && (BK) == 64)) &&    \
+                      (32 <= NUM_THREADS && NUM_THREADS <= 1024) && (((BK) * (BN)) % (NUM_THREADS * 4) == 0) &&        \
+                      (((BM) * (BK)) % (NUM_THREADS * 4) == 0)) {                                                      \
+            ADD_KERNEL((sgemm_3<BM, BN, BK, TM, TN, TK>));                                                             \
         }                                                                                                              \
     } while (0)
-#define ADD_SGEMM3_BM(BN, BK, TM, TN, TK)                                                                              \
-    ADD_SGEMM3(32, BN, BK, TM, TN, TK);                                                                                \
-    ADD_SGEMM3(64, BN, BK, TM, TN, TK);                                                                                \
-    ADD_SGEMM3(128, BN, BK, TM, TN, TK)
-#define ADD_SGEMM3_BN(BK, TM, TN, TK)                                                                                  \
-    ADD_SGEMM3_BM(32, BK, TM, TN, TK);                                                                                 \
-    ADD_SGEMM3_BM(64, BK, TM, TN, TK);                                                                                 \
-    ADD_SGEMM3_BM(128, BK, TM, TN, TK)
-#define ADD_SGEMM3_BK(TM, TN, TK)                                                                                      \
-    ADD_SGEMM3_BN(32, TM, TN, TK);                                                                                     \
-    ADD_SGEMM3_BN(64, TM, TN, TK);                                                                                     \
-    ADD_SGEMM3_BN(128, TM, TN, TK)
-#define ADD_SGEMM3_TM(TN, TK)                                                                                          \
-    ADD_SGEMM3_BK(4, TN, TK);                                                                                          \
-    ADD_SGEMM3_BK(8, TN, TK)
-#define ADD_SGEMM3_TN(TK)                                                                                              \
-    ADD_SGEMM3_TM(4, TK);                                                                                              \
-    ADD_SGEMM3_TM(8, TK)
-#define ADD_SGEMM3_ALL                                                                                                 \
-    ADD_SGEMM3_TN(1);                                                                                                  \
-    ADD_SGEMM3_TN(2);                                                                                                  \
-    ADD_SGEMM3_TN(4);                                                                                                  \
-    ADD_SGEMM3_TN(8)
 
-    // ADD_SGEMM3_ALL;
-    ADD_SGEMM3(32, 32, 32, 4, 4, 4);
+#define ADD_SGEMM3_TK(BM, BN, BK, TM, TN)                                                                              \
+    ADD_SGEMM3(BM, BN, BK, TM, TN, 1);                                                                                 \
+    ADD_SGEMM3(BM, BN, BK, TM, TN, 2);                                                                                 \
+    ADD_SGEMM3(BM, BN, BK, TM, TN, 4);                                                                                 \
+    ADD_SGEMM3(BM, BN, BK, TM, TN, 8)
+
+#define ADD_SGEMM3_TN(BM, BN, BK, TM)                                                                                  \
+    ADD_SGEMM3_TK(BM, BN, BK, TM, 4);                                                                                  \
+    ADD_SGEMM3_TK(BM, BN, BK, TM, 8)
+
+#define ADD_SGEMM3_TM(BM, BN, BK)                                                                                      \
+    ADD_SGEMM3_TN(BM, BN, BK, 1);                                                                                      \
+    ADD_SGEMM3_TN(BM, BN, BK, 2);                                                                                      \
+    ADD_SGEMM3_TN(BM, BN, BK, 4);                                                                                      \
+    ADD_SGEMM3_TN(BM, BN, BK, 8)
+
+#define ADD_SGEMM3_BK(BM, BN)                                                                                          \
+    ADD_SGEMM3_TM(BM, BN, 32);                                                                                         \
+    ADD_SGEMM3_TM(BM, BN, 64);                                                                                         \
+    ADD_SGEMM3_TM(BM, BN, 128)
+
+#define ADD_SGEMM3_BN(BM)                                                                                              \
+    ADD_SGEMM3_BK(BM, 32);                                                                                             \
+    ADD_SGEMM3_BK(BM, 64);                                                                                             \
+    ADD_SGEMM3_BK(BM, 128)
+
+#define ADD_SGEMM3_ALL                                                                                                 \
+    ADD_SGEMM3_BN(32);                                                                                                 \
+    ADD_SGEMM3_BN(64);                                                                                                 \
+    ADD_SGEMM3_BN(128)
+
+    ADD_SGEMM3_ALL;
+    // ADD_SGEMM3(32, 32, 32, 1, 4, 4);
 
     printf("----- M=%d N=%d K=%d -----\n", M, N, K);
 
@@ -313,7 +321,7 @@ void perf(int M, int N, int K) {
             if (!is_close(C1[i], C2[i], 1e-4, 1e-5)) {
                 int x = i % N;
                 int y = i / N;
-                printf("[%s] error: value diff at (%d, %d): c1=%f vs c2=%f\n", name.c_str(), y, x, C1[i], C2[i]);
+                printf("[%s] error: result diff at (%d, %d): c1=%f vs c2=%f\n", name.c_str(), y, x, C1[i], C2[i]);
                 is_correct = false;
                 break;
             }
