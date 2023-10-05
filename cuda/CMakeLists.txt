@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.18)
 project(CUDA_LAB LANGUAGES CXX CUDA)
 
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib CACHE STRING "")
@@ -10,7 +10,7 @@ if (NOT CMAKE_BUILD_TYPE)
 endif ()
 
 find_package(CUDA REQUIRED)
-set(CMAKE_CUDA_ARCHITECTURES 70 75)
+set(CMAKE_CUDA_ARCHITECTURES 70)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
@@ -19,7 +19,7 @@ option(PTX_VERBOSE "" OFF)
 if (PTX_VERBOSE)
     set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -Xptxas=-v")
 endif ()
-set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75")
+
 set(CUDA_NVCC_FLAGS_DEBUG "${CUDA_NVCC_FLAGS_DEBUG} -G")
 set(CUDA_NVCC_FLAGS_RELEASE "${CUDA_NVCC_FLAGS_RELEASE} -DNDEBUG -O3 --use_fast_math")
 
@@ -32,5 +32,5 @@ add_executable(gemm gemm.cu)
 target_link_libraries(gemm ${CUDA_CUBLAS_LIBRARIES})
 
 # clang-format
-file(GLOB_RECURSE SOURCES src/*.cpp src/*.h src/*.cu src/*.cuh)
-add_custom_target(format COMMAND clang-format -i ${SOURCES})
+file(GLOB SOURCES *.cpp *.h *.cu *.cuh)
+add_custom_target(lint COMMAND clang-format -i ${SOURCES})

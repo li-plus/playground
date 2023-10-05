@@ -77,6 +77,8 @@ static constexpr size_t KB = 1024;
 static constexpr size_t MB = 1024ull * KB;
 static constexpr size_t GB = 1024ull * MB;
 
+static constexpr int WARP_SIZE = 32;
+
 struct V100SXM2Spec {
     static constexpr float PEAK_MEM_BW = 900; // GB/s
     static constexpr float PEAK_FP32_TFLOPS = 15.7;

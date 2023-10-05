@@ -1,12 +1,13 @@
-// tutorial: https://siboehm.com/articles/22/CUDA-MMM
+// Tutorial: https://siboehm.com/articles/22/CUDA-MMM
+// CUTLASS docs: https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md
 
 #include "common.h"
 #include <functional>
 #include <iostream>
 #include <vector>
 
-__global__ void sgemm_1_kernel(int M, int N, int K, const float *__restrict__ A, const float *__restrict__ B,
-                               float *__restrict__ C) {
+__global__ void sgemm1_kernel(int M, int N, int K, const float *__restrict__ A, const float *__restrict__ B,
+                              float *__restrict__ C) {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -19,17 +20,17 @@ __global__ void sgemm_1_kernel(int M, int N, int K, const float *__restrict__ A,
     }
 }
 
-static inline void sgemm_1(int M, int N, int K, const float *A, const float *B, float *C) {
+static inline void sgemm1(int M, int N, int K, const float *A, const float *B, float *C) {
     constexpr int BLOCK_DIM_X = 32;
     constexpr int BLOCK_DIM_Y = 32;
     dim3 grid_dim(ceil_div(N, BLOCK_DIM_X), ceil_div(M, BLOCK_DIM_Y));
     dim3 block_dim(BLOCK_DIM_X, BLOCK_DIM_Y);
-    sgemm_1_kernel<<<grid_dim, block_dim>>>(M, N, K, A, B, C);
+    sgemm1_kernel<<<grid_dim, block_dim>>>(M, N, K, A, B, C);
 }
 
 template <int BLOCK_DIM>
-__global__ void sgemm_2_kernel(int M, int N, int K, const float *__restrict__ A, const float *__restrict__ B,
-                               float *__restrict__ C) {
+__global__ void sgemm2_kernel(int M, int N, int K, const float *__restrict__ A, const float *__restrict__ B,
+                              float *__restrict__ C) {
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
     const int bx = blockIdx.x;
@@ -58,11 +59,11 @@ __global__ void sgemm_2_kernel(int M, int N, int K, const float *__restrict__ A,
     C[ty * N + tx] = s;
 }
 
-static inline void sgemm_2(int M, int N, int K, const float *A, const float *B, float *C) {
+static inline void sgemm2(int M, int N, int K, const float *A, const float *B, float *C) {
     constexpr int BLOCK_DIM = 32;
     dim3 grid_dim(ceil_div(N, BLOCK_DIM), ceil_div(M, BLOCK_DIM));
     dim3 block_dim(BLOCK_DIM, BLOCK_DIM);
-    sgemm_2_kernel<BLOCK_DIM><<<grid_dim, block_dim>>>(M, N, K, A, B, C);
+    sgemm2_kernel<BLOCK_DIM><<<grid_dim, block_dim>>>(M, N, K, A, B, C);
 }
 
 __device__ static inline float4 operator+(const float4 &a, const float4 &b) {
@@ -73,10 +74,15 @@ __device__ static inline float4 &operator+=(float4 &self, const float4 &other) {
 
 __device__ static inline float4 operator*(const float4 &a, float s) { return {a.x * s, a.y * s, a.z * s, a.w * s}; }
 
+template <size_t N>
+struct FloatN {
+    using type = std::conditional_t<N % 4 == 0, float4, std::conditional_t<N % 2 == 0, float2, float>>;
+};
+
 template <int BM, int BN, int BK, int TM, int TN, int TK>
 __global__ void __launch_bounds__((BM / TM) * (BN / TN))
-    sgemm_3_kernel(int M, int N, int K, const float *__restrict__ A, const float *__restrict__ B,
-                   float *__restrict__ C) {
+    sgemm3_kernel(int M, int N, int K, const float *__restrict__ A, const float *__restrict__ B,
+                  float *__restrict__ C) {
     static_assert(TN % 4 == 0); // float4
     static_assert(TK == 1 || TK == 2 || TK % 4 == 0);
 
@@ -142,15 +148,11 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
             // each thread loads pAs[0:TM][0:TK] into Areg
 #pragma unroll
             for (int tm = 0; tm < TM; tm++) {
-                if constexpr (TK == 1) {
-                    Areg[tm * TK] = pAs[tm * BK];
-                } else if constexpr (TK == 2) {
-                    *(float2 *)&Areg[tm * TK] = *(float2 *)&pAs[tm * BK];
-                } else {
+                using float_tk = typename FloatN<TK>::type;
+                constexpr size_t float_tk_n = sizeof(float_tk) / sizeof(float);
 #pragma unroll
-                    for (int tk = 0; tk < TK; tk += 4) {
-                        *(float4 *)&Areg[tm * TK + tk] = *(float4 *)&pAs[tm * BK + tk];
-                    }
+                for (int tk = 0; tk < TK; tk += float_tk_n) {
+                    *(float_tk *)&Areg[tm * TK + tk] = *(float_tk *)&pAs[tm * BK + tk];
                 }
             }
             // each thread loads pBs[0:TK][0:TN] into Breg and compute matmul
@@ -178,6 +180,7 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
 
 #pragma unroll
     for (int tm = 0; tm < TM; tm++) {
+#pragma unroll
         for (int tn = 0; tn < TN; tn += 4) {
             *(float4 *)&C[(by * BM + ty * TM + tm) * N + bx * BN + tx * TN + tn] = *(float4 *)&sums[tm * TN + tn];
         }
@@ -185,7 +188,7 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
 }
 
 template <int BM = 32, int BN = 32, int BK = 32, int TM = 4, int TN = 4, int TK = 4>
-static inline void sgemm_3(int M, int N, int K, const float *A, const float *B, float *C) {
+static inline void sgemm3(int M, int N, int K, const float *A, const float *B, float *C) {
     CHECK(N % BN == 0 && M % BM == 0 && K % BK == 0) << "invalid matrix dimensions";
 
     static_assert(BM % TM == 0 && BN % TN == 0 && BK % TK == 0);
@@ -197,7 +200,175 @@ static inline void sgemm_3(int M, int N, int K, const float *A, const float *B, 
 
     dim3 grid_dim(N / BN, M / BM);
     dim3 block_dim(BLOCK_DIM_X, BLOCK_DIM_Y);
-    sgemm_3_kernel<BM, BN, BK, TM, TN, TK><<<grid_dim, block_dim>>>(M, N, K, A, B, C);
+    sgemm3_kernel<BM, BN, BK, TM, TN, TK><<<grid_dim, block_dim>>>(M, N, K, A, B, C);
+}
+
+template <int BM, int BN, int BK, int WM, int WN, int WNITER, int TM, int TN, int TK>
+__global__ void __launch_bounds__((BM / WM) * (BN / WN) * WARP_SIZE)
+    sgemm4_kernel(int M, int N, int K, const float *__restrict__ A, const float *__restrict__ B,
+                  float *__restrict__ C) {
+    static_assert(TN % 4 == 0); // float4
+    static_assert(TK == 1 || TK == 2 || TK % 4 == 0);
+
+    const int tid = threadIdx.x; // thread id
+
+    // warp tiling
+    constexpr int NUM_WARPS_M = BM / WM;
+    constexpr int NUM_WARPS_N = BN / WN;
+    static_assert(WN % WNITER == 0);
+    constexpr int WSUBN = WN / WNITER;
+    static_assert(WSUBN % TN == 0);
+    constexpr int NUM_LANES_N = WSUBN / TN;
+    static_assert(WARP_SIZE % NUM_LANES_N == 0);
+    constexpr int NUM_LANES_M = WARP_SIZE / NUM_LANES_N;
+    constexpr int WSUBM = NUM_LANES_M * TM;
+    static_assert(WM % WSUBM == 0);
+    constexpr int WMITER = WM / WSUBM;
+
+    const int warp_id = tid / WARP_SIZE;
+    const int wm = warp_id / NUM_WARPS_N; // warp row index
+    const int wn = warp_id % NUM_WARPS_N; // warp column index
+
+    const int lane_id = tid % WARP_SIZE;
+    const int lm = lane_id / NUM_LANES_N; // lane row index
+    const int ln = lane_id % NUM_LANES_N; // lane column index
+
+    constexpr int NUM_THREADS = NUM_WARPS_M * NUM_WARPS_N * WARP_SIZE;
+
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
+
+    __shared__ float As[BM * BK];
+    __shared__ float Bs[BK * BN];
+
+    float Areg[WMITER * TM * TK];
+    float sums[WMITER * WNITER * TM * TN] = {};
+
+    A += by * BM * K; // move A to top-left corner of first row block
+    B += bx * BN;     // move B to top-left corner of first column block
+
+    // constants for loading A/B from global memory into shared memory
+    static_assert((BM * BK) % (NUM_THREADS * 4) == 0);
+    constexpr int A_LOAD_TILE_Y = (NUM_THREADS * 4 < BK) ? 1 : NUM_THREADS * 4 / BK;
+    constexpr int A_LOAD_TILE_X = (NUM_THREADS * 4 < BK) ? NUM_THREADS * 4 : BK;
+    const int A_y_offset = tid * 4 / BK;
+    const int A_x_offset = tid * 4 % BK;
+
+    static_assert((BK * BN) % (NUM_THREADS * 4) == 0);
+    constexpr int B_LOAD_TILE_Y = (NUM_THREADS * 4 < BN) ? 1 : NUM_THREADS * 4 / BN;
+    constexpr int B_LOAD_TILE_X = (NUM_THREADS * 4 < BN) ? NUM_THREADS * 4 : BN;
+    const int B_y_offset = tid * 4 / BN;
+    const int B_x_offset = tid * 4 % BN;
+
+    for (int k = 0; k < K; k += BK) {
+        // each block loads A[0:BM][0:BK] into As
+#pragma unroll
+        for (int A_y_start = 0; A_y_start < BM; A_y_start += A_LOAD_TILE_Y) {
+            const int A_y = A_y_start + A_y_offset;
+#pragma unroll
+            for (int A_x_start = 0; A_x_start < BK; A_x_start += A_LOAD_TILE_X) {
+                const int A_x = A_x_start + A_x_offset;
+                *(float4 *)&As[A_y * BK + A_x] = *(float4 *)&A[A_y * K + A_x];
+            }
+        }
+        // each block loads B[0:BK][0:BN] into Bs
+#pragma unroll
+        for (int B_y_start = 0; B_y_start < BK; B_y_start += B_LOAD_TILE_Y) {
+            const int B_y = B_y_start + B_y_offset;
+#pragma unroll
+            for (int B_x_start = 0; B_x_start < BN; B_x_start += B_LOAD_TILE_X) {
+                const int B_x = B_x_start + B_x_offset;
+                *(float4 *)&Bs[B_y * BN + B_x] = *(float4 *)&B[B_y * N + B_x];
+            }
+        }
+        __syncthreads();
+
+        float *pAs = As + wm * WM * BK;
+        float *pBs = Bs + wn * WN;
+
+#pragma unroll
+        for (int bk = 0; bk < BK; bk += TK) {
+            // each warp loads the entire warp tile into registers
+            float *tAs = pAs + lm * TM * BK;
+            float *tAreg = Areg;
+
+#pragma unroll
+            for (int wmiter = 0; wmiter < WMITER; wmiter++) {
+                // each thread loads tAs[0:TM][0:TK] into tAreg
+#pragma unroll
+                for (int tm = 0; tm < TM; tm++) {
+                    using float_tk = typename FloatN<TK>::type;
+                    constexpr size_t float_tk_n = sizeof(float_tk) / sizeof(float);
+#pragma unroll
+                    for (int tk = 0; tk < TK; tk += float_tk_n) {
+                        *(float_tk *)&tAreg[tm * TK + tk] = *(float_tk *)&tAs[tm * BK + tk];
+                    }
+                }
+                tAs += WSUBM * BK;
+                tAreg += TM * TK;
+            }
+
+            float *tBs = pBs + ln * TN;
+#pragma unroll
+            for (int wniter = 0; wniter < WNITER; wniter++) {
+                // each thread loads tBs[0:TK][0:TN] into Breg and compute matmul
+#pragma unroll
+                for (int tk = 0; tk < TK; tk++) {
+#pragma unroll
+                    for (int tn = 0; tn < TN; tn += 4) {
+                        float4 Breg = *(float4 *)&tBs[tk * BN + tn];
+#pragma unroll
+                        for (int wmiter = 0; wmiter < WMITER; wmiter++) {
+#pragma unroll
+                            for (int tm = 0; tm < TM; tm++) {
+                                *(float4 *)&sums[(wmiter * WNITER + wniter) * TM * TN + tm * TN + tn] +=
+                                    Breg * Areg[wmiter * TM * TK + tm * TK + tk];
+                            }
+                        }
+                    }
+                }
+                tBs += WSUBN;
+            }
+
+            pAs += TK;
+            pBs += TK * BN;
+        }
+
+        A += BK;
+        B += BK * N;
+
+        __syncthreads();
+    }
+
+    // move C to the top-left corner of warp tile, so that each warp takes care of C[0:WM][0:WN]
+    C += (by * BM + wm * WM) * N + bx * BN + wn * WN;
+#pragma unroll
+    for (int wmiter = 0; wmiter < WMITER; wmiter++) {
+#pragma unroll
+        for (int wniter = 0; wniter < WNITER; wniter++) {
+            float *tC = C + (wmiter * WSUBM + lm * TM) * N + wniter * WSUBN + ln * TN;
+#pragma unroll
+            for (int tm = 0; tm < TM; tm++) {
+#pragma unroll
+                for (int tn = 0; tn < TN; tn += 4) {
+                    *(float4 *)&tC[tm * N + tn] = *(float4 *)&sums[(wmiter * WNITER + wniter) * TM * TN + tm * TN + tn];
+                }
+            }
+        }
+    }
+}
+
+template <int BM = 32, int BN = 32, int BK = 32, int WM = 16, int WN = 32, int WNITER = 1, int TM = 4, int TN = 4,
+          int TK = 4>
+static inline void sgemm4(int M, int N, int K, const float *A, const float *B, float *C) {
+    static_assert(BM % WM == 0 && BN % WN == 0);
+    constexpr int NUM_THREADS = (BM / WM) * (BN / WN) * WARP_SIZE;
+    static_assert(32 <= NUM_THREADS && NUM_THREADS <= 1024);
+
+    CHECK(N % BN == 0 && M % BM == 0 && K % BK == 0) << "invalid matrix dimensions";
+    dim3 grid_dim(N / BN, M / BM);
+    dim3 block_dim(NUM_THREADS);
+    sgemm4_kernel<BM, BN, BK, WM, WN, WNITER, TM, TN, TK><<<grid_dim, block_dim>>>(M, N, K, A, B, C);
 }
 
 static inline void cublas_sgemm(cublasHandle_t handle, int M, int N, int K, const float *dA, const float *dB,
@@ -232,22 +403,26 @@ void perf(int M, int N, int K) {
 
     std::vector<std::pair<std::string, std::function<void(int, int, int, const float *, const float *, float *)>>>
         kernels{
-            {"sgemm_1", sgemm_1},
-            {"sgemm_2", sgemm_2},
+            {"sgemm1", sgemm1},
+            {"sgemm2", sgemm2},
             {"cublas", [handle](int M, int N, int K, const float *dA, const float *dB,
                                 float *dC) { cublas_sgemm(handle, M, N, K, dA, dB, dC); }},
         };
+
+#define TRY_DIV(a, b) ((b != 0) ? (a) / (b) : 0)
 
 #define ADD_KERNEL(stmt) kernels.emplace_back(#stmt, (stmt))
 
 #define ADD_SGEMM3(BM, BN, BK, TM, TN, TK)                                                                             \
     do {                                                                                                               \
-        constexpr int NUM_THREADS = (BM) / (TM) * (BN) / (TN);                                                         \
-        if constexpr (!(((BN) == 128 && (BK) == 128) || ((BM) == 128 && (BK) == 128) ||                                \
-                        ((BM) == 64 && (BN) == 64 && (BK) == 128) || ((BM) == 128 && (BN) == 128 && (BK) == 64)) &&    \
-                      (32 <= NUM_THREADS && NUM_THREADS <= 1024) && (((BK) * (BN)) % (NUM_THREADS * 4) == 0) &&        \
-                      (((BM) * (BK)) % (NUM_THREADS * 4) == 0)) {                                                      \
-            ADD_KERNEL((sgemm_3<BM, BN, BK, TM, TN, TK>));                                                             \
+        constexpr int NUM_THREADS = (BM / TM) * (BN / TN);                                                             \
+        constexpr bool is_valid_num_threads = (32 <= NUM_THREADS) && (NUM_THREADS <= 1024);                            \
+        constexpr bool is_shm_oom = (BN == 128 && BK == 128) || (BM == 128 && BK == 128) ||                            \
+                                    (BM == 64 && BN == 64 && BK == 128) || (BM == 128 && BN == 128 && BK == 64);       \
+        constexpr bool is_valid_load_tile =                                                                            \
+            ((BK * BN) % (NUM_THREADS * 4) == 0) && ((BM * BK) % (NUM_THREADS * 4) == 0);                              \
+        if constexpr (is_valid_num_threads && !is_shm_oom && is_valid_load_tile) {                                     \
+            ADD_KERNEL((sgemm3<BM, BN, BK, TM, TN, TK>));                                                              \
         }                                                                                                              \
     } while (0)
 
@@ -282,8 +457,84 @@ void perf(int M, int N, int K) {
     ADD_SGEMM3_BN(64);                                                                                                 \
     ADD_SGEMM3_BN(128)
 
-    ADD_SGEMM3_ALL;
-    // ADD_SGEMM3(32, 32, 32, 1, 4, 4);
+    // ADD_SGEMM3_ALL;
+    ADD_SGEMM3(32, 32, 64, 2, 4, 4);  // best for 128 & 256
+    ADD_SGEMM3(64, 64, 64, 4, 4, 2);  // best for 512
+    ADD_SGEMM3(32, 64, 32, 4, 4, 4);  // best for 1024
+    ADD_SGEMM3(64, 64, 32, 8, 4, 1);  // best for 2048
+    ADD_SGEMM3(128, 64, 32, 8, 4, 1); // best for 4096
+
+#define ADD_SGEMM4(BM, BN, BK, WM, WN, WNITER, TM, TN, TK)                                                             \
+    do {                                                                                                               \
+        constexpr int NUM_WARPS_M = BM / WM;                                                                           \
+        constexpr int NUM_WARPS_N = BN / WN;                                                                           \
+        constexpr int NUM_THREADS = NUM_WARPS_M * NUM_WARPS_N * WARP_SIZE;                                             \
+        constexpr bool is_valid_num_threads = (32 <= NUM_THREADS) && (NUM_THREADS <= 1024);                            \
+        constexpr bool is_shared_oom = (BN == 128 && BK == 128) || BM == 128 && BK == 128 ||                           \
+                                       (BM == 64 && BN == 64 && BK == 128) || (BM == 128 && BN == 128 && BK == 64);    \
+        constexpr bool is_valid_warp_tile = (WN % (WNITER * TN) == 0) && (WARP_SIZE * WNITER * TN % WN == 0) &&        \
+                                            ((WM * WN) % (WARP_SIZE * WNITER * TM * TN) == 0);                         \
+        constexpr bool is_valid_load_tile =                                                                            \
+            is_valid_num_threads && ((BK * BN) % (NUM_THREADS * 4) == 0) && ((BM * BK) % (NUM_THREADS * 4) == 0);      \
+        constexpr int WSUBN = TRY_DIV(WN, WNITER);                                                                     \
+        constexpr int NUM_LANES_N = TRY_DIV(WSUBN, TN);                                                                \
+        constexpr int NUM_LANES_M = TRY_DIV(WARP_SIZE, NUM_LANES_N);                                                   \
+        constexpr int WSUBM = NUM_LANES_M * TM;                                                                        \
+        constexpr int WMITER = TRY_DIV(WM, WSUBM);                                                                     \
+        constexpr bool is_4x8_warp = (NUM_LANES_N == 4 && NUM_LANES_M == 8) || (NUM_LANES_N == 8 && NUM_LANES_M == 4); \
+        if constexpr (is_valid_num_threads && !is_shared_oom && is_valid_warp_tile && is_valid_load_tile &&            \
+                      is_4x8_warp && WMITER <= 2) {                                                                    \
+            ADD_KERNEL((sgemm4<BM, BN, BK, WM, WN, WNITER, TM, TN, TK>));                                              \
+        }                                                                                                              \
+    } while (0)
+
+#define ADD_SGEMM4_TK(BM, BN, BK, WM, WN, WNITER, TM, TN)                                                              \
+    ADD_SGEMM4(BM, BN, BK, WM, WN, WNITER, TM, TN, 1);                                                                 \
+    ADD_SGEMM4(BM, BN, BK, WM, WN, WNITER, TM, TN, 2);                                                                 \
+    ADD_SGEMM4(BM, BN, BK, WM, WN, WNITER, TM, TN, 4)
+
+#define ADD_SGEMM4_TN(BM, BN, BK, WM, WN, WNITER, TM) ADD_SGEMM4_TK(BM, BN, BK, WM, WN, WNITER, TM, 4)
+
+#define ADD_SGEMM4_TM(BM, BN, BK, WM, WN, WNITER)                                                                      \
+    ADD_SGEMM4_TN(BM, BN, BK, WM, WN, WNITER, 1);                                                                      \
+    ADD_SGEMM4_TN(BM, BN, BK, WM, WN, WNITER, 2);                                                                      \
+    ADD_SGEMM4_TN(BM, BN, BK, WM, WN, WNITER, 4)
+
+#define ADD_SGEMM4_WNITER(BM, BN, BK, WM, WN)                                                                          \
+    ADD_SGEMM4_TM(BM, BN, BK, WM, WN, 1);                                                                              \
+    ADD_SGEMM4_TM(BM, BN, BK, WM, WN, 2)
+
+#define ADD_SGEMM4_WN(BM, BN, BK, WM)                                                                                  \
+    ADD_SGEMM4_WNITER(BM, BN, BK, WM, 8);                                                                              \
+    ADD_SGEMM4_WNITER(BM, BN, BK, WM, 16);                                                                             \
+    ADD_SGEMM4_WNITER(BM, BN, BK, WM, 32);                                                                             \
+    ADD_SGEMM4_WNITER(BM, BN, BK, WM, 64);                                                                             \
+    ADD_SGEMM4_WNITER(BM, BN, BK, WM, 128)
+
+#define ADD_SGEMM4_WM(BM, BN, BK)                                                                                      \
+    ADD_SGEMM4_WN(BM, BN, BK, 8);                                                                                      \
+    ADD_SGEMM4_WN(BM, BN, BK, 16);                                                                                     \
+    ADD_SGEMM4_WN(BM, BN, BK, 32);                                                                                     \
+    ADD_SGEMM4_WN(BM, BN, BK, 64);                                                                                     \
+    ADD_SGEMM4_WN(BM, BN, BK, 128)
+
+#define ADD_SGEMM4_BK(BM, BN)                                                                                          \
+    ADD_SGEMM4_WM(BM, BN, 32);                                                                                         \
+    ADD_SGEMM4_WM(BM, BN, 64);                                                                                         \
+    ADD_SGEMM4_WM(BM, BN, 128)
+
+#define ADD_SGEMM4_BN(BM)                                                                                              \
+    ADD_SGEMM4_BK(BM, 32);                                                                                             \
+    ADD_SGEMM4_BK(BM, 64);                                                                                             \
+    ADD_SGEMM4_BK(BM, 128)
+
+#define ADD_SGEMM4_ALL                                                                                                 \
+    ADD_SGEMM4_BN(32);                                                                                                 \
+    ADD_SGEMM4_BN(64);                                                                                                 \
+    ADD_SGEMM4_BN(128)
+
+    ADD_SGEMM4(32, 32, 32, 32, 32, 2, 4, 4, 4);
+    // ADD_SGEMM4_ALL;
 
     printf("----- M=%d N=%d K=%d -----\n", M, N, K);
 
@@ -327,30 +578,30 @@ void perf(int M, int N, int K) {
             }
         }
 
-        if (!is_correct) {
-            continue;
-        }
+        if (is_correct) {
+            auto perf_fn = [=] { fn(M, N, K, dA, dB, dC1); };
+            const int warmup = 4096 / M;
+            const int active = warmup * 4;
+            const float elapsed_ms = timeit(perf_fn, warmup, active);
 
-        auto perf_fn = [=] { fn(M, N, K, dA, dB, dC1); };
-        float elapsed_ms = timeit(perf_fn, 3, 10);
+            const float tflops_peak = V100SXM2Spec::PEAK_FP32_TFLOPS;
+            const float tflops_actual = (2ull * M * N * K) / elapsed_ms / (1000.f * 1000.f * 1000.f);
+            const float mfu = tflops_actual / tflops_peak;
 
-        float tflops_peak = V100SXM2Spec::PEAK_FP32_TFLOPS;
-        float tflops_actual = (2ull * M * N * K) / elapsed_ms / (1000.f * 1000.f * 1000.f);
-        float mfu = tflops_actual / tflops_peak;
+            const float bw_peak = V100SXM2Spec::PEAK_MEM_BW;
+            const float bw_actual = (M * K + K * N + M * N) * sizeof(float) / (float)GB / (elapsed_ms / 1000);
+            const float mbu = bw_actual / bw_peak;
 
-        float bw_peak = V100SXM2Spec::PEAK_MEM_BW;
-        float bw_actual = (M * K + K * N + M * N) * sizeof(float) / (float)GB / (elapsed_ms / 1000);
-        float mbu = bw_actual / bw_peak;
+            printf("[%s] elapsed %.3f ms, mfu %.3f (%.1f/%.1f TFLOPS), mbu %.3f (%.1f/%.1f GB/s)\n", name.c_str(),
+                   elapsed_ms, mfu, tflops_actual, tflops_peak, mbu, bw_actual, bw_peak);
 
-        printf("[%s] elapsed %.3f ms, mfu %.3f (%.1f/%.1f TFLOPS), mbu %.3f (%.1f/%.1f GB/s)\n", name.c_str(),
-               elapsed_ms, mfu, tflops_actual, tflops_peak, mbu, bw_actual, bw_peak);
-
-        if (name == "cublas") {
-            cublas_record.name = name;
-            cublas_record.elapsed_ms = elapsed_ms;
-        } else if (elapsed_ms < best_record.elapsed_ms) {
-            best_record.name = name;
-            best_record.elapsed_ms = elapsed_ms;
+            if (name == "cublas") {
+                cublas_record.name = name;
+                cublas_record.elapsed_ms = elapsed_ms;
+            } else if (elapsed_ms < best_record.elapsed_ms) {
+                best_record.name = name;
+                best_record.elapsed_ms = elapsed_ms;
+            }
         }
 
         free(C1);
@@ -381,19 +632,19 @@ int main(int argc, char **argv) {
     }
 
     // non-square
-    {
-        int dims[]{512, 1024, 2048};
-        for (int M : dims) {
-            for (int N : dims) {
-                for (int K : dims) {
-                    if (M == N && N == K) {
-                        continue;
-                    }
-                    perf(M, N, K);
-                }
-            }
-        }
-    }
+    // {
+    //     int dims[]{512, 1024, 2048};
+    //     for (int M : dims) {
+    //         for (int N : dims) {
+    //             for (int K : dims) {
+    //                 if (M == N && N == K) {
+    //                     continue;
+    //                 }
+    //                 perf(M, N, K);
+    //             }
+    //         }
+    //     }
+    // }
 
     return 0;
 }
