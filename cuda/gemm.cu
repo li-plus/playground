@@ -67,19 +67,21 @@ static inline void sgemm2(int M, int N, int K, const float *A, const float *B, f
 }
 
 __device__ static inline float4 operator+(const float4 &a, const float4 &b) {
-    return {a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w};
+    return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
 }
 
 __device__ static inline float4 &operator+=(float4 &self, const float4 &other) { return self = self + other; }
 
-__device__ static inline float4 operator*(const float4 &a, float s) { return {a.x * s, a.y * s, a.z * s, a.w * s}; }
+__device__ static inline float4 operator*(const float4 &a, float s) {
+    return make_float4(a.x * s, a.y * s, a.z * s, a.w * s);
+}
 
 template <size_t N>
 struct FloatN {
     using type = std::conditional_t<N % 4 == 0, float4, std::conditional_t<N % 2 == 0, float2, float>>;
 };
 
-template <int BM, int BN, int BK, int TM, int TN, int TK>
+template <int BM, int BN, int BK, int TM, int TN, int TK, bool USE_PREFETCH>
 __global__ void __launch_bounds__((BM / TM) * (BN / TN))
     sgemm3_kernel(int M, int N, int K, const float *__restrict__ A, const float *__restrict__ B,
                   float *__restrict__ C) {
@@ -96,7 +98,6 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
     __shared__ float As[BM * BK];
     __shared__ float Bs[BK * BN];
 
-    float Areg[TM * TK];
     float sums[TM * TN] = {};
 
     A += by * BM * K; // move A to top-left corner of first row block
@@ -117,53 +118,161 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
     const int B_y_offset = tid * 4 / BN;
     const int B_x_offset = tid * 4 % BN;
 
+    using float_tk = typename FloatN<TK>::type;
+    constexpr size_t float_tk_n = sizeof(float_tk) / sizeof(float);
+
+    // constants & registers for prefetch
+    constexpr int PREFETCH_A_STEPS_Y = BM / A_LOAD_TILE_Y;
+    constexpr int PREFETCH_A_STEPS_X = BK / A_LOAD_TILE_X;
+    constexpr int PREFETCH_A_STEPS = PREFETCH_A_STEPS_Y * PREFETCH_A_STEPS_X;
+    float4 As_next[PREFETCH_A_STEPS];
+    constexpr int PREFETCH_B_STEPS_Y = BK / B_LOAD_TILE_Y;
+    constexpr int PREFETCH_B_STEPS_X = BN / B_LOAD_TILE_X;
+    constexpr int PREFETCH_B_STEPS = PREFETCH_B_STEPS_Y * PREFETCH_B_STEPS_X;
+    float4 Bs_next[PREFETCH_B_STEPS];
+
+    constexpr int BK_STEPS = BK / TK;
+    // static_assert(!USE_PREFETCH || BK_STEPS >= PREFETCH_A_STEPS);
+    constexpr int PREFETCH_A_EVERY_BK_STEPS = (BK_STEPS >= PREFETCH_A_STEPS) ? BK_STEPS / PREFETCH_A_STEPS : 1;
+    constexpr int PREFETCH_A_NUM_PER_STEP = PREFETCH_A_STEPS / (BK_STEPS / PREFETCH_A_EVERY_BK_STEPS);
+    // static_assert(!USE_PREFETCH || BK_STEPS >= PREFETCH_B_STEPS);
+    constexpr int PREFETCH_B_EVERY_BK_STEPS = (BK_STEPS >= PREFETCH_B_STEPS) ? BK_STEPS / PREFETCH_B_STEPS : 1;
+    constexpr int PREFETCH_B_NUM_PER_STEP = PREFETCH_B_STEPS / (BK_STEPS / PREFETCH_B_EVERY_BK_STEPS);
+
     for (int k = 0; k < K; k += BK) {
-        // each block loads A[0:BM][0:BK] into As
+        if (!USE_PREFETCH || k == 0) {
+            // each block loads A[0:BM][0:BK] into As
 #pragma unroll
-        for (int A_y_start = 0; A_y_start < BM; A_y_start += A_LOAD_TILE_Y) {
-            const int A_y = A_y_start + A_y_offset;
+            for (int A_y_start = 0; A_y_start < BM; A_y_start += A_LOAD_TILE_Y) {
+                const int A_y = A_y_start + A_y_offset;
 #pragma unroll
-            for (int A_x_start = 0; A_x_start < BK; A_x_start += A_LOAD_TILE_X) {
-                const int A_x = A_x_start + A_x_offset;
-                *(float4 *)&As[A_y * BK + A_x] = *(float4 *)&A[A_y * K + A_x];
+                for (int A_x_start = 0; A_x_start < BK; A_x_start += A_LOAD_TILE_X) {
+                    const int A_x = A_x_start + A_x_offset;
+                    *(float4 *)&As[A_y * BK + A_x] = *(float4 *)&A[A_y * K + A_x];
+                }
             }
-        }
-        // each block loads B[0:BK][0:BN] into Bs
+            // each block loads B[0:BK][0:BN] into Bs
 #pragma unroll
-        for (int B_y_start = 0; B_y_start < BK; B_y_start += B_LOAD_TILE_Y) {
-            const int B_y = B_y_start + B_y_offset;
+            for (int B_y_start = 0; B_y_start < BK; B_y_start += B_LOAD_TILE_Y) {
+                const int B_y = B_y_start + B_y_offset;
 #pragma unroll
-            for (int B_x_start = 0; B_x_start < BN; B_x_start += B_LOAD_TILE_X) {
-                const int B_x = B_x_start + B_x_offset;
-                *(float4 *)&Bs[B_y * BN + B_x] = *(float4 *)&B[B_y * N + B_x];
+                for (int B_x_start = 0; B_x_start < BN; B_x_start += B_LOAD_TILE_X) {
+                    const int B_x = B_x_start + B_x_offset;
+                    *(float4 *)&Bs[B_y * BN + B_x] = *(float4 *)&B[B_y * N + B_x];
+                }
+            }
+        } else {
+            // load prefetched next tile into As
+#pragma unroll
+            for (int A_y_start = 0; A_y_start < BM; A_y_start += A_LOAD_TILE_Y) {
+                const int A_y = A_y_start + A_y_offset;
+                const int A_next_y = A_y_start / A_LOAD_TILE_Y;
+#pragma unroll
+                for (int A_x_start = 0; A_x_start < BK; A_x_start += A_LOAD_TILE_X) {
+                    const int A_x = A_x_start + A_x_offset;
+                    const int A_next_x = A_x_start / A_LOAD_TILE_X;
+                    *(float4 *)&As[A_y * BK + A_x] = As_next[A_next_y * PREFETCH_A_STEPS_X + A_next_x];
+                }
+            }
+            // load prefetched next tile into Bs
+#pragma unroll
+            for (int B_y_start = 0; B_y_start < BK; B_y_start += B_LOAD_TILE_Y) {
+                const int B_y = B_y_start + B_y_offset;
+                const int B_next_y = B_y_start / B_LOAD_TILE_Y;
+#pragma unroll
+                for (int B_x_start = 0; B_x_start < BN; B_x_start += B_LOAD_TILE_X) {
+                    const int B_x = B_x_start + B_x_offset;
+                    const int B_next_x = B_x_start / B_LOAD_TILE_X;
+                    *(float4 *)&Bs[B_y * BN + B_x] = Bs_next[B_next_y * PREFETCH_B_STEPS_X + B_next_x];
+                }
             }
         }
         __syncthreads();
 
-        float *pAs = As + ty * TM * BK;
-        float *pBs = Bs + tx * TN;
+        const float *pAs = As + ty * TM * BK;
+        const float *pBs = Bs + tx * TN;
+
+        const float *A_next = A + BK;
+        const float *B_next = B + BK * N;
 
 #pragma unroll
         for (int bk = 0; bk < BK; bk += TK) {
-            // each thread loads pAs[0:TM][0:TK] into Areg
+            if constexpr (USE_PREFETCH) {
+                if (k + BK < K && bk % (TK * PREFETCH_A_EVERY_BK_STEPS) == 0) {
+                    // prefetch next float4 of As tile from global memory into register
+                    const int A_prefetch_idx_start = bk / (TK * PREFETCH_A_EVERY_BK_STEPS) * PREFETCH_A_NUM_PER_STEP;
 #pragma unroll
-            for (int tm = 0; tm < TM; tm++) {
-                using float_tk = typename FloatN<TK>::type;
-                constexpr size_t float_tk_n = sizeof(float_tk) / sizeof(float);
+                    for (int A_prefetch_idx_offset = 0; A_prefetch_idx_offset < PREFETCH_A_NUM_PER_STEP;
+                         A_prefetch_idx_offset++) {
+                        const int A_prefetch_idx = A_prefetch_idx_start + A_prefetch_idx_offset;
+                        const int A_prefetch_y = A_prefetch_idx / PREFETCH_A_STEPS_X;
+                        const int A_prefetch_x = A_prefetch_idx % PREFETCH_A_STEPS_X;
+                        const int A_y = A_prefetch_y * A_LOAD_TILE_Y + A_y_offset;
+                        const int A_x = A_prefetch_x * A_LOAD_TILE_X + A_x_offset;
+                        As_next[A_prefetch_idx] = *(float4 *)&A_next[A_y * K + A_x];
+                    }
+                }
+                if (k + BK < K && bk % (TK * PREFETCH_B_EVERY_BK_STEPS) == 0) {
+                    // prefetch next float4 of Bs tile from global memory into register
+                    const int B_prefetch_idx_start = bk / (TK * PREFETCH_B_EVERY_BK_STEPS);
 #pragma unroll
-                for (int tk = 0; tk < TK; tk += float_tk_n) {
-                    *(float_tk *)&Areg[tm * TK + tk] = *(float_tk *)&pAs[tm * BK + tk];
+                    for (int B_prefetch_idx_offset = 0; B_prefetch_idx_offset < PREFETCH_B_NUM_PER_STEP;
+                         B_prefetch_idx_offset++) {
+                        const int B_prefetch_idx = B_prefetch_idx_start + B_prefetch_idx_offset;
+                        const int B_prefetch_y = B_prefetch_idx / PREFETCH_B_STEPS_X;
+                        const int B_prefetch_x = B_prefetch_idx % PREFETCH_B_STEPS_X;
+                        const int B_y = B_prefetch_y * B_LOAD_TILE_Y + B_y_offset;
+                        const int B_x = B_prefetch_x * B_LOAD_TILE_X + B_x_offset;
+                        Bs_next[B_prefetch_idx] = *(float4 *)&B_next[B_y * N + B_x];
+                    }
                 }
             }
-            // each thread loads pBs[0:TK][0:TN] into Breg and compute matmul
+            // minimize register usage
+            if constexpr (TM <= TN) {
+                float Areg[TM * TK];
+                // each thread loads pAs[0:TM][0:TK] into Areg
 #pragma unroll
-            for (int tk = 0; tk < TK; tk++) {
+                for (int tm = 0; tm < TM; tm++) {
 #pragma unroll
-                for (int tn = 0; tn < TN; tn += 4) {
-                    float4 Breg = *(float4 *)&pBs[tk * BN + tn];
+                    for (int tk = 0; tk < TK; tk += float_tk_n) {
+                        *(float_tk *)&Areg[tm * TK + tk] = *(float_tk *)&pAs[tm * BK + tk];
+                    }
+                }
+                // each thread loads pBs[0:TK][0:TN] into Breg and compute matmul
 #pragma unroll
-                    for (int tm = 0; tm < TM; tm++) {
-                        *(float4 *)&sums[tm * TN + tn] += Breg * Areg[tm * TK + tk];
+                for (int tk = 0; tk < TK; tk++) {
+#pragma unroll
+                    for (int tn = 0; tn < TN; tn += 4) {
+                        float4 Breg = *(float4 *)&pBs[tk * BN + tn];
+#pragma unroll
+                        for (int tm = 0; tm < TM; tm++) {
+                            *(float4 *)&sums[tm * TN + tn] += Breg * Areg[tm * TK + tk];
+                        }
+                    }
+                }
+            } else {
+                float Breg[TK * TN];
+                // each thread loads pBs[0:TK][0:TN] into Breg
+#pragma unroll
+                for (int tk = 0; tk < TK; tk++) {
+#pragma unroll
+                    for (int tn = 0; tn < TN; tn += 4) {
+                        *(float4 *)&Breg[tk * TN + tn] = *(float4 *)&pBs[tk * BN + tn];
+                    }
+                }
+                // each thread loads pAs[0:TM][0:TK] into Areg and compute matmul
+#pragma unroll
+                for (int tm = 0; tm < TM; tm++) {
+#pragma unroll
+                    for (int tk = 0; tk < TK; tk += float_tk_n) {
+                        float_tk Areg = *(float_tk *)&pAs[tm * BK + tk];
+#pragma unroll
+                        for (int tsubk = 0; tsubk < float_tk_n; tsubk++) {
+#pragma unroll
+                            for (int tn = 0; tn < TN; tn++) {
+                                sums[tm * TN + tn] += Breg[(tk + tsubk) * TN + tn] * ((float *)&Areg)[tsubk];
+                            }
+                        }
                     }
                 }
             }
@@ -172,8 +281,8 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
             pBs += TK * BN;
         }
 
-        A += BK;
-        B += BK * N;
+        A = A_next;
+        B = B_next;
 
         __syncthreads();
     }
@@ -187,7 +296,7 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
     }
 }
 
-template <int BM = 32, int BN = 32, int BK = 32, int TM = 4, int TN = 4, int TK = 4>
+template <int BM = 32, int BN = 32, int BK = 32, int TM = 4, int TN = 4, int TK = 4, bool USE_PREFETCH = true>
 static inline void sgemm3(int M, int N, int K, const float *A, const float *B, float *C) {
     CHECK(N % BN == 0 && M % BM == 0 && K % BK == 0) << "invalid matrix dimensions";
 
@@ -200,7 +309,7 @@ static inline void sgemm3(int M, int N, int K, const float *A, const float *B, f
 
     dim3 grid_dim(N / BN, M / BM);
     dim3 block_dim(BLOCK_DIM_X, BLOCK_DIM_Y);
-    sgemm3_kernel<BM, BN, BK, TM, TN, TK><<<grid_dim, block_dim>>>(M, N, K, A, B, C);
+    sgemm3_kernel<BM, BN, BK, TM, TN, TK, USE_PREFETCH><<<grid_dim, block_dim>>>(M, N, K, A, B, C);
 }
 
 template <int BM, int BN, int BK, int WM, int WN, int WNITER, int TM, int TN, int TK>
@@ -413,7 +522,7 @@ void perf(int M, int N, int K) {
 
 #define ADD_KERNEL(stmt) kernels.emplace_back(#stmt, (stmt))
 
-#define ADD_SGEMM3(BM, BN, BK, TM, TN, TK)                                                                             \
+#define ADD_SGEMM3(BM, BN, BK, TM, TN, TK, USE_PREFETCH)                                                               \
     do {                                                                                                               \
         constexpr int NUM_THREADS = (BM / TM) * (BN / TN);                                                             \
         constexpr bool is_valid_num_threads = (32 <= NUM_THREADS) && (NUM_THREADS <= 1024);                            \
@@ -422,15 +531,21 @@ void perf(int M, int N, int K) {
         constexpr bool is_valid_load_tile =                                                                            \
             ((BK * BN) % (NUM_THREADS * 4) == 0) && ((BM * BK) % (NUM_THREADS * 4) == 0);                              \
         if constexpr (is_valid_num_threads && !is_shm_oom && is_valid_load_tile) {                                     \
-            ADD_KERNEL((sgemm3<BM, BN, BK, TM, TN, TK>));                                                              \
+            ADD_KERNEL((sgemm3<BM, BN, BK, TM, TN, TK, USE_PREFETCH>));                                                \
         }                                                                                                              \
     } while (0)
 
+    // constexpr bool is_valid_prefetch = !USE_PREFETCH || (4 * BM >= TM * TN * TK && 4 * BN >= TM * TN * TK);
+
+#define ADD_SGEMM3_USE_PREFETCH(BM, BN, BK, TM, TN, TK)                                                                \
+    ADD_SGEMM3(BM, BN, BK, TM, TN, TK, false);                                                                         \
+    ADD_SGEMM3(BM, BN, BK, TM, TN, TK, true)
+
 #define ADD_SGEMM3_TK(BM, BN, BK, TM, TN)                                                                              \
-    ADD_SGEMM3(BM, BN, BK, TM, TN, 1);                                                                                 \
-    ADD_SGEMM3(BM, BN, BK, TM, TN, 2);                                                                                 \
-    ADD_SGEMM3(BM, BN, BK, TM, TN, 4);                                                                                 \
-    ADD_SGEMM3(BM, BN, BK, TM, TN, 8)
+    ADD_SGEMM3_USE_PREFETCH(BM, BN, BK, TM, TN, 1);                                                                    \
+    ADD_SGEMM3_USE_PREFETCH(BM, BN, BK, TM, TN, 2);                                                                    \
+    ADD_SGEMM3_USE_PREFETCH(BM, BN, BK, TM, TN, 4);                                                                    \
+    ADD_SGEMM3_USE_PREFETCH(BM, BN, BK, TM, TN, 8)
 
 #define ADD_SGEMM3_TN(BM, BN, BK, TM)                                                                                  \
     ADD_SGEMM3_TK(BM, BN, BK, TM, 4);                                                                                  \
@@ -457,12 +572,12 @@ void perf(int M, int N, int K) {
     ADD_SGEMM3_BN(64);                                                                                                 \
     ADD_SGEMM3_BN(128)
 
-    // ADD_SGEMM3_ALL;
-    ADD_SGEMM3(32, 32, 64, 2, 4, 4);  // best for 128 & 256
-    ADD_SGEMM3(64, 64, 64, 4, 4, 2);  // best for 512
-    ADD_SGEMM3(32, 64, 32, 4, 4, 4);  // best for 1024
-    ADD_SGEMM3(64, 64, 32, 8, 4, 1);  // best for 2048
-    ADD_SGEMM3(128, 64, 32, 8, 4, 1); // best for 4096
+    ADD_SGEMM3_ALL;
+    // ADD_SGEMM3(32, 32, 64, 2, 4, 4, true);  // best for 128 & 256
+    // ADD_SGEMM3(64, 64, 64, 4, 4, 2, true);  // best for 512
+    // ADD_SGEMM3(32, 64, 32, 4, 4, 4, true);  // best for 1024
+    // ADD_SGEMM3(64, 64, 32, 8, 4, 1, true);  // best for 2048
+    // ADD_SGEMM3(128, 64, 32, 8, 4, 1, true); // best for 4096
 
 #define ADD_SGEMM4(BM, BN, BK, WM, WN, WNITER, TM, TN, TK)                                                             \
     do {                                                                                                               \
