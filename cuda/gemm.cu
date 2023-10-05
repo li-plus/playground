@@ -214,7 +214,7 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
                 }
                 if (k + BK < K && bk % (TK * PREFETCH_B_EVERY_BK_STEPS) == 0) {
                     // prefetch next float4 of Bs tile from global memory into register
-                    const int B_prefetch_idx_start = bk / (TK * PREFETCH_B_EVERY_BK_STEPS);
+                    const int B_prefetch_idx_start = bk / (TK * PREFETCH_B_EVERY_BK_STEPS) * PREFETCH_B_NUM_PER_STEP;
 #pragma unroll
                     for (int B_prefetch_idx_offset = 0; B_prefetch_idx_offset < PREFETCH_B_NUM_PER_STEP;
                          B_prefetch_idx_offset++) {
