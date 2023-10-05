@@ -572,12 +572,22 @@ void perf(int M, int N, int K) {
     ADD_SGEMM3_BN(64);                                                                                                 \
     ADD_SGEMM3_BN(128)
 
-    ADD_SGEMM3_ALL;
-    // ADD_SGEMM3(32, 32, 64, 2, 4, 4, true);  // best for 128 & 256
-    // ADD_SGEMM3(64, 64, 64, 4, 4, 2, true);  // best for 512
-    // ADD_SGEMM3(32, 64, 32, 4, 4, 4, true);  // best for 1024
-    // ADD_SGEMM3(64, 64, 32, 8, 4, 1, true);  // best for 2048
-    // ADD_SGEMM3(128, 64, 32, 8, 4, 1, true); // best for 4096
+    // ADD_SGEMM3_ALL;
+
+    // best kernels on V100-SXM2
+    ADD_SGEMM3(32, 32, 32, 2, 4, 1, true);  // best for 128 & 256
+    ADD_SGEMM3(64, 64, 32, 4, 4, 1, true);  // best for 512
+    ADD_SGEMM3(32, 64, 32, 4, 4, 2, false); // best for 1024
+    ADD_SGEMM3(64, 64, 64, 4, 4, 8, true);  // best for 2048
+    ADD_SGEMM3(128, 64, 32, 8, 4, 1, true); // best for 4096
+
+    // best kernels on A100-SXM4-80GB
+    ADD_SGEMM3(32, 32, 128, 2, 4, 8, false); // best for 128
+    ADD_SGEMM3(32, 32, 128, 2, 4, 8, true);  // best for 256
+    ADD_SGEMM3(64, 64, 64, 4, 4, 8, true);   // best for 512
+    ADD_SGEMM3(32, 64, 64, 4, 4, 8, true);   // best for 1024
+    ADD_SGEMM3(128, 64, 32, 8, 4, 1, true);  // best for 2048
+    ADD_SGEMM3(64, 64, 32, 8, 4, 2, true);   // best for 4096
 
 #define ADD_SGEMM4(BM, BN, BK, WM, WN, WNITER, TM, TN, TK)                                                             \
     do {                                                                                                               \
