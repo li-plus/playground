@@ -81,7 +81,7 @@ struct FloatN {
     using type = std::conditional_t<N % 4 == 0, float4, std::conditional_t<N % 2 == 0, float2, float>>;
 };
 
-template <int BM, int BN, int BK, int TM, int TN, int TK, bool USE_PREFETCH>
+template <int BM, int BN, int BK, int TM, int TN, int TK, bool PREFETCH_GLOBAL, bool PREFETCH_SHARED>
 __global__ void __launch_bounds__((BM / TM) * (BN / TN))
     sgemm3_kernel(int M, int N, int K, const float *__restrict__ A, const float *__restrict__ B,
                   float *__restrict__ C) {
@@ -132,15 +132,13 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
     float4 Bs_next[PREFETCH_B_STEPS];
 
     constexpr int BK_STEPS = BK / TK;
-    // static_assert(!USE_PREFETCH || BK_STEPS >= PREFETCH_A_STEPS);
     constexpr int PREFETCH_A_EVERY_BK_STEPS = (BK_STEPS >= PREFETCH_A_STEPS) ? BK_STEPS / PREFETCH_A_STEPS : 1;
     constexpr int PREFETCH_A_NUM_PER_STEP = PREFETCH_A_STEPS / (BK_STEPS / PREFETCH_A_EVERY_BK_STEPS);
-    // static_assert(!USE_PREFETCH || BK_STEPS >= PREFETCH_B_STEPS);
     constexpr int PREFETCH_B_EVERY_BK_STEPS = (BK_STEPS >= PREFETCH_B_STEPS) ? BK_STEPS / PREFETCH_B_STEPS : 1;
     constexpr int PREFETCH_B_NUM_PER_STEP = PREFETCH_B_STEPS / (BK_STEPS / PREFETCH_B_EVERY_BK_STEPS);
 
     for (int k = 0; k < K; k += BK) {
-        if (!USE_PREFETCH || k == 0) {
+        if (!PREFETCH_GLOBAL || k == 0) {
             // each block loads A[0:BM][0:BK] into As
 #pragma unroll
             for (int A_y_start = 0; A_y_start < BM; A_y_start += A_LOAD_TILE_Y) {
@@ -197,7 +195,7 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
 
 #pragma unroll
         for (int bk = 0; bk < BK; bk += TK) {
-            if constexpr (USE_PREFETCH) {
+            if constexpr (PREFETCH_GLOBAL) {
                 if (k + BK < K && bk % (TK * PREFETCH_A_EVERY_BK_STEPS) == 0) {
                     // prefetch next float4 of As tile from global memory into register
                     const int A_prefetch_idx_start = bk / (TK * PREFETCH_A_EVERY_BK_STEPS) * PREFETCH_A_NUM_PER_STEP;
@@ -239,11 +237,24 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
                     }
                 }
                 // each thread loads pBs[0:TK][0:TN] into Breg and compute matmul
+                float4 Breg_next; // for prefetch
 #pragma unroll
                 for (int tk = 0; tk < TK; tk++) {
 #pragma unroll
                     for (int tn = 0; tn < TN; tn += 4) {
-                        float4 Breg = *(float4 *)&pBs[tk * BN + tn];
+                        float4 Breg;
+                        if (!PREFETCH_SHARED || tk + tn == 0) {
+                            Breg = *(float4 *)&pBs[tk * BN + tn];
+                        } else {
+                            Breg = Breg_next;
+                        }
+                        if constexpr (PREFETCH_SHARED) {
+                            if (tn + 4 < TN) {
+                                Breg_next = *(float4 *)&pBs[tk * BN + tn + 4];
+                            } else if (tk + 1 < TK) {
+                                Breg_next = *(float4 *)&pBs[(tk + 1) * BN];
+                            }
+                        }
 #pragma unroll
                         for (int tm = 0; tm < TM; tm++) {
                             *(float4 *)&sums[tm * TN + tn] += Breg * Areg[tm * TK + tk];
@@ -261,11 +272,24 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
                     }
                 }
                 // each thread loads pAs[0:TM][0:TK] into Areg and compute matmul
+                float_tk Areg_next; // for prefetch
 #pragma unroll
                 for (int tm = 0; tm < TM; tm++) {
 #pragma unroll
                     for (int tk = 0; tk < TK; tk += float_tk_n) {
-                        float_tk Areg = *(float_tk *)&pAs[tm * BK + tk];
+                        float_tk Areg;
+                        if (!PREFETCH_SHARED || tm + tk == 0) {
+                            Areg = *(float_tk *)&pAs[tm * BK + tk];
+                        } else {
+                            Areg = Areg_next;
+                        }
+                        if constexpr (PREFETCH_SHARED) {
+                            if (tk + float_tk_n < TK) {
+                                Areg_next = *(float_tk *)&pAs[tm * BK + tk + float_tk_n];
+                            } else if (tm + 1 < TM) {
+                                Areg_next = *(float_tk *)&pAs[(tm + 1) * BK];
+                            }
+                        }
 #pragma unroll
                         for (int tsubk = 0; tsubk < float_tk_n; tsubk++) {
 #pragma unroll
@@ -296,7 +320,8 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
     }
 }
 
-template <int BM = 32, int BN = 32, int BK = 32, int TM = 4, int TN = 4, int TK = 4, bool USE_PREFETCH = true>
+template <int BM = 32, int BN = 32, int BK = 32, int TM = 4, int TN = 4, int TK = 4, bool PREFETCH_GLOBAL = true,
+          bool PREFETCH_SHARED = false>
 static inline void sgemm3(int M, int N, int K, const float *A, const float *B, float *C) {
     CHECK(N % BN == 0 && M % BM == 0 && K % BK == 0) << "invalid matrix dimensions";
 
@@ -309,7 +334,7 @@ static inline void sgemm3(int M, int N, int K, const float *A, const float *B, f
 
     dim3 grid_dim(N / BN, M / BM);
     dim3 block_dim(BLOCK_DIM_X, BLOCK_DIM_Y);
-    sgemm3_kernel<BM, BN, BK, TM, TN, TK, USE_PREFETCH><<<grid_dim, block_dim>>>(M, N, K, A, B, C);
+    sgemm3_kernel<BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL, PREFETCH_SHARED><<<grid_dim, block_dim>>>(M, N, K, A, B, C);
 }
 
 template <int BM, int BN, int BK, int WM, int WN, int WNITER, int TM, int TN, int TK>
@@ -522,7 +547,7 @@ void perf(int M, int N, int K) {
 
 #define ADD_KERNEL(stmt) kernels.emplace_back(#stmt, (stmt))
 
-#define ADD_SGEMM3(BM, BN, BK, TM, TN, TK, USE_PREFETCH)                                                               \
+#define ADD_SGEMM3(BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL, PREFETCH_SHARED)                                           \
     do {                                                                                                               \
         constexpr int NUM_THREADS = (BM / TM) * (BN / TN);                                                             \
         constexpr bool is_valid_num_threads = (32 <= NUM_THREADS) && (NUM_THREADS <= 1024);                            \
@@ -531,21 +556,22 @@ void perf(int M, int N, int K) {
         constexpr bool is_valid_load_tile =                                                                            \
             ((BK * BN) % (NUM_THREADS * 4) == 0) && ((BM * BK) % (NUM_THREADS * 4) == 0);                              \
         if constexpr (is_valid_num_threads && !is_shm_oom && is_valid_load_tile) {                                     \
-            ADD_KERNEL((sgemm3<BM, BN, BK, TM, TN, TK, USE_PREFETCH>));                                                \
+            ADD_KERNEL((sgemm3<BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL, PREFETCH_SHARED>));                            \
         }                                                                                                              \
     } while (0)
 
-    // constexpr bool is_valid_prefetch = !USE_PREFETCH || (4 * BM >= TM * TN * TK && 4 * BN >= TM * TN * TK);
+#define ADD_SGEMM3_PREFETCH_SHARED(BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL)                                            \
+    ADD_SGEMM3(BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL, false)
 
-#define ADD_SGEMM3_USE_PREFETCH(BM, BN, BK, TM, TN, TK)                                                                \
-    ADD_SGEMM3(BM, BN, BK, TM, TN, TK, false);                                                                         \
-    ADD_SGEMM3(BM, BN, BK, TM, TN, TK, true)
+#define ADD_SGEMM3_PREFETCH_GLOBAL(BM, BN, BK, TM, TN, TK)                                                             \
+    ADD_SGEMM3(BM, BN, BK, TM, TN, TK, false, false);                                                                  \
+    ADD_SGEMM3(BM, BN, BK, TM, TN, TK, true, false)
 
 #define ADD_SGEMM3_TK(BM, BN, BK, TM, TN)                                                                              \
-    ADD_SGEMM3_USE_PREFETCH(BM, BN, BK, TM, TN, 1);                                                                    \
-    ADD_SGEMM3_USE_PREFETCH(BM, BN, BK, TM, TN, 2);                                                                    \
-    ADD_SGEMM3_USE_PREFETCH(BM, BN, BK, TM, TN, 4);                                                                    \
-    ADD_SGEMM3_USE_PREFETCH(BM, BN, BK, TM, TN, 8)
+    ADD_SGEMM3_PREFETCH_GLOBAL(BM, BN, BK, TM, TN, 1);                                                                 \
+    ADD_SGEMM3_PREFETCH_GLOBAL(BM, BN, BK, TM, TN, 2);                                                                 \
+    ADD_SGEMM3_PREFETCH_GLOBAL(BM, BN, BK, TM, TN, 4);                                                                 \
+    ADD_SGEMM3_PREFETCH_GLOBAL(BM, BN, BK, TM, TN, 8)
 
 #define ADD_SGEMM3_TN(BM, BN, BK, TM)                                                                                  \
     ADD_SGEMM3_TK(BM, BN, BK, TM, 4);                                                                                  \
@@ -575,19 +601,19 @@ void perf(int M, int N, int K) {
     // ADD_SGEMM3_ALL;
 
     // best kernels on V100-SXM2
-    ADD_SGEMM3(32, 32, 32, 2, 4, 1, true);  // best for 128 & 256
-    ADD_SGEMM3(64, 64, 32, 4, 4, 1, true);  // best for 512
-    ADD_SGEMM3(32, 64, 32, 4, 4, 2, false); // best for 1024
-    ADD_SGEMM3(64, 64, 64, 4, 4, 8, true);  // best for 2048
-    ADD_SGEMM3(128, 64, 32, 8, 4, 1, true); // best for 4096
+    ADD_SGEMM3(32, 32, 32, 2, 4, 1, true, false);  // best for 128 & 256
+    ADD_SGEMM3(64, 64, 32, 4, 4, 1, true, false);  // best for 512
+    ADD_SGEMM3(32, 64, 32, 4, 4, 2, false, false); // best for 1024
+    ADD_SGEMM3(64, 64, 64, 4, 4, 8, true, false);  // best for 2048
+    ADD_SGEMM3(128, 64, 32, 8, 4, 1, true, false); // best for 4096
 
     // best kernels on A100-SXM4-80GB
-    ADD_SGEMM3(32, 32, 128, 2, 4, 8, false); // best for 128
-    ADD_SGEMM3(32, 32, 128, 2, 4, 8, true);  // best for 256
-    ADD_SGEMM3(64, 64, 64, 4, 4, 8, true);   // best for 512
-    ADD_SGEMM3(32, 64, 64, 4, 4, 8, true);   // best for 1024
-    ADD_SGEMM3(128, 64, 32, 8, 4, 1, true);  // best for 2048
-    ADD_SGEMM3(64, 64, 32, 8, 4, 2, true);   // best for 4096
+    ADD_SGEMM3(32, 32, 128, 2, 4, 8, false, false); // best for 128
+    ADD_SGEMM3(32, 32, 128, 2, 4, 8, true, false);  // best for 256
+    ADD_SGEMM3(64, 64, 64, 4, 4, 8, true, false);   // best for 512
+    ADD_SGEMM3(32, 64, 64, 4, 4, 8, true, false);   // best for 1024
+    ADD_SGEMM3(128, 64, 32, 8, 4, 1, true, false);  // best for 2048
+    ADD_SGEMM3(64, 64, 32, 8, 4, 2, true, false);   // best for 4096
 
 #define ADD_SGEMM4(BM, BN, BK, WM, WN, WNITER, TM, TN, TK)                                                             \
     do {                                                                                                               \
