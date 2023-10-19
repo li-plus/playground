@@ -81,7 +81,7 @@ struct FloatN {
     using type = std::conditional_t<N % 4 == 0, float4, std::conditional_t<N % 2 == 0, float2, float>>;
 };
 
-template <int BM, int BN, int BK, int TM, int TN, int TK, bool PREFETCH_GLOBAL, bool PREFETCH_SHARED>
+template <int BM, int BN, int BK, int TM, int TN, int TK, bool PREFETCH_GLOBAL, bool PREFETCH_SHARED, int GM>
 __global__ void __launch_bounds__((BM / TM) * (BN / TN))
     sgemm3_kernel(int M, int N, int K, const float *__restrict__ A, const float *__restrict__ B,
                   float *__restrict__ C) {
@@ -90,8 +90,21 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
 
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
-    const int bx = blockIdx.x;
-    const int by = blockIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    if constexpr (GM > 1) {
+        // L2 cache optimization: https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
+        const int bid = by * gridDim.x + bx;
+        const int num_blocks_m = (M + (BM - 1)) / BM;
+        const int num_blocks_n = (N + (BN - 1)) / BN;
+        const int num_blocks_in_group = GM * num_blocks_n;
+        const int group_id = bid / num_blocks_in_group;
+        const int first_block_m = group_id * GM;
+        const int gm = min(num_blocks_m - first_block_m, GM);
+        const int bid_in_group = bid - group_id * num_blocks_in_group;
+        bx = bid_in_group / gm;
+        by = first_block_m + (bid_in_group - bx * gm);
+    }
 
     const int tid = ty * blockDim.x + tx;
 
@@ -321,7 +334,7 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
 }
 
 template <int BM = 32, int BN = 32, int BK = 32, int TM = 4, int TN = 4, int TK = 4, bool PREFETCH_GLOBAL = true,
-          bool PREFETCH_SHARED = false>
+          bool PREFETCH_SHARED = false, int GM = 1>
 static inline void sgemm3(int M, int N, int K, const float *A, const float *B, float *C) {
     CHECK(N % BN == 0 && M % BM == 0 && K % BK == 0) << "invalid matrix dimensions";
 
@@ -334,7 +347,8 @@ static inline void sgemm3(int M, int N, int K, const float *A, const float *B, f
 
     dim3 grid_dim(N / BN, M / BM);
     dim3 block_dim(BLOCK_DIM_X, BLOCK_DIM_Y);
-    sgemm3_kernel<BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL, PREFETCH_SHARED><<<grid_dim, block_dim>>>(M, N, K, A, B, C);
+    sgemm3_kernel<BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL, PREFETCH_SHARED, GM>
+        <<<grid_dim, block_dim>>>(M, N, K, A, B, C);
 }
 
 template <int BM, int BN, int BK, int WM, int WN, int WNITER, int TM, int TN, int TK, bool PREFETCH_GLOBAL>
@@ -623,7 +637,7 @@ void perf(int M, int N, int K) {
 
 #define ADD_KERNEL(stmt) kernels.emplace_back(#stmt, (stmt))
 
-#define ADD_SGEMM3(BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL, PREFETCH_SHARED)                                           \
+#define ADD_SGEMM3(BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL, PREFETCH_SHARED, GM)                                       \
     do {                                                                                                               \
         constexpr int NUM_THREADS = (BM / TM) * (BN / TN);                                                             \
         constexpr bool is_valid_num_threads = (32 <= NUM_THREADS) && (NUM_THREADS <= 1024);                            \
@@ -632,16 +646,21 @@ void perf(int M, int N, int K) {
         constexpr bool is_valid_load_tile =                                                                            \
             ((BK * BN) % (NUM_THREADS * 4) == 0) && ((BM * BK) % (NUM_THREADS * 4) == 0);                              \
         if constexpr (is_valid_num_threads && !is_shm_oom && is_valid_load_tile) {                                     \
-            ADD_KERNEL((sgemm3<BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL, PREFETCH_SHARED>));                            \
+            ADD_KERNEL((sgemm3<BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL, PREFETCH_SHARED, GM>));                        \
         }                                                                                                              \
     } while (0)
 
+#define ADD_SGEMM3_GM(BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL, PREFETCH_SHARED)                                        \
+    ADD_SGEMM3(BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL, PREFETCH_SHARED, 1);                                           \
+    ADD_SGEMM3(BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL, PREFETCH_SHARED, 4);                                           \
+    ADD_SGEMM3(BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL, PREFETCH_SHARED, 8)
+
 #define ADD_SGEMM3_PREFETCH_SHARED(BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL)                                            \
-    ADD_SGEMM3(BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL, false)
+    ADD_SGEMM3_GM(BM, BN, BK, TM, TN, TK, PREFETCH_GLOBAL, false)
 
 #define ADD_SGEMM3_PREFETCH_GLOBAL(BM, BN, BK, TM, TN, TK)                                                             \
-    ADD_SGEMM3(BM, BN, BK, TM, TN, TK, false, false);                                                                  \
-    ADD_SGEMM3(BM, BN, BK, TM, TN, TK, true, false)
+    ADD_SGEMM3_PREFETCH_SHARED(BM, BN, BK, TM, TN, TK, false);                                                         \
+    ADD_SGEMM3_PREFETCH_SHARED(BM, BN, BK, TM, TN, TK, true)
 
 #define ADD_SGEMM3_TK(BM, BN, BK, TM, TN)                                                                              \
     ADD_SGEMM3_PREFETCH_GLOBAL(BM, BN, BK, TM, TN, 1);                                                                 \
@@ -649,9 +668,7 @@ void perf(int M, int N, int K) {
     ADD_SGEMM3_PREFETCH_GLOBAL(BM, BN, BK, TM, TN, 4);                                                                 \
     ADD_SGEMM3_PREFETCH_GLOBAL(BM, BN, BK, TM, TN, 8)
 
-#define ADD_SGEMM3_TN(BM, BN, BK, TM)                                                                                  \
-    ADD_SGEMM3_TK(BM, BN, BK, TM, 4);                                                                                  \
-    ADD_SGEMM3_TK(BM, BN, BK, TM, 8)
+#define ADD_SGEMM3_TN(BM, BN, BK, TM) ADD_SGEMM3_TK(BM, BN, BK, TM, 4)
 
 #define ADD_SGEMM3_TM(BM, BN, BK)                                                                                      \
     ADD_SGEMM3_TN(BM, BN, BK, 1);                                                                                      \
@@ -677,19 +694,19 @@ void perf(int M, int N, int K) {
     // ADD_SGEMM3_ALL;
 
     // best kernels on V100-SXM2
-    ADD_SGEMM3(32, 32, 32, 2, 4, 1, true, false);  // best for 128 & 256
-    ADD_SGEMM3(64, 64, 32, 4, 4, 1, true, false);  // best for 512
-    ADD_SGEMM3(32, 64, 32, 4, 4, 2, false, false); // best for 1024
-    ADD_SGEMM3(64, 64, 64, 4, 4, 8, true, false);  // best for 2048
-    ADD_SGEMM3(128, 64, 32, 8, 4, 1, true, false); // best for 4096
+    ADD_SGEMM3(32, 32, 32, 2, 4, 1, true, false, 1);  // best for 128 & 256
+    ADD_SGEMM3(64, 64, 32, 4, 4, 1, true, false, 1);  // best for 512
+    ADD_SGEMM3(32, 64, 32, 4, 4, 2, false, false, 8); // best for 1024
+    ADD_SGEMM3(64, 64, 64, 4, 4, 8, true, false, 8);  // best for 2048
+    ADD_SGEMM3(128, 64, 32, 8, 4, 1, true, false, 4); // best for 4096
 
     // best kernels on A100-SXM4-80GB
-    ADD_SGEMM3(32, 32, 128, 2, 4, 8, false, false); // best for 128
-    ADD_SGEMM3(32, 32, 128, 2, 4, 8, true, false);  // best for 256
-    ADD_SGEMM3(64, 64, 64, 4, 4, 8, true, false);   // best for 512
-    ADD_SGEMM3(32, 64, 64, 4, 4, 8, true, false);   // best for 1024
-    ADD_SGEMM3(128, 64, 32, 8, 4, 1, true, false);  // best for 2048
-    ADD_SGEMM3(64, 64, 32, 8, 4, 2, true, false);   // best for 4096
+    // ADD_SGEMM3_GM(32, 32, 128, 2, 4, 8, false, false); // best for 128
+    // ADD_SGEMM3_GM(32, 32, 128, 2, 4, 8, true, false);  // best for 256
+    // ADD_SGEMM3_GM(64, 64, 64, 4, 4, 8, true, false);   // best for 512
+    // ADD_SGEMM3_GM(32, 64, 64, 4, 4, 8, true, false);   // best for 1024
+    // ADD_SGEMM3_GM(128, 64, 32, 8, 4, 1, true, false);  // best for 2048
+    // ADD_SGEMM3_GM(64, 64, 32, 8, 4, 2, true, false);   // best for 4096
 
 #define ADD_SGEMM4(BM, BN, BK, WM, WN, WNITER, TM, TN, TK, PREFETCH_GLOBAL)                                            \
     do {                                                                                                               \
