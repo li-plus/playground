@@ -31,17 +31,17 @@ Best results on V100:
 Best results on A100:
 ```
 ----- M=128 N=128 K=128 -----
-[best] (sgemm3<32, 32, 128, 2, 4, 8, false>) vs cublas: 135.9%
+[best] (sgemm3<32, 32, 128, 2, 4, 8, false, false, 1>) vs cublas: 131.7%
 ----- M=256 N=256 K=256 -----
-[best] (sgemm3<32, 32, 128, 2, 4, 8, true>) vs cublas: 134.2%
+[best] (sgemm3<32, 32, 128, 2, 4, 8, true, false, 1>) vs cublas: 134.1%
 ----- M=512 N=512 K=512 -----
-[best] (sgemm3<64, 64, 64, 4, 4, 8, true>) vs cublas: 87.6%
+[best] (sgemm3<64, 64, 64, 4, 4, 8, true, false, 4>) vs cublas: 86.6%
 ----- M=1024 N=1024 K=1024 -----
-[best] (sgemm3<32, 64, 64, 4, 4, 8, true>) vs cublas: 89.0%
+[best] (sgemm3<32, 64, 64, 4, 4, 8, true, false, 1>) vs cublas: 88.9%
 ----- M=2048 N=2048 K=2048 -----
-[best] (sgemm3<128, 64, 32, 8, 4, 1, true>) vs cublas: 95.6%
+[best] (sgemm3<128, 64, 32, 8, 4, 1, true, false, 1>) vs cublas: 95.5%
 ----- M=4096 N=4096 K=4096 -----
-[best] (sgemm3<64, 64, 32, 8, 4, 2, true>) vs cublas: 94.8%
+[best] (sgemm3<64, 64, 32, 8, 4, 2, true, false, 1>) vs cublas: 94.9%
 ```
 
 # GPU Arch

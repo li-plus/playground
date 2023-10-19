@@ -701,12 +701,12 @@ void perf(int M, int N, int K) {
     ADD_SGEMM3(128, 64, 32, 8, 4, 1, true, false, 4); // best for 4096
 
     // best kernels on A100-SXM4-80GB
-    // ADD_SGEMM3_GM(32, 32, 128, 2, 4, 8, false, false); // best for 128
-    // ADD_SGEMM3_GM(32, 32, 128, 2, 4, 8, true, false);  // best for 256
-    // ADD_SGEMM3_GM(64, 64, 64, 4, 4, 8, true, false);   // best for 512
-    // ADD_SGEMM3_GM(32, 64, 64, 4, 4, 8, true, false);   // best for 1024
-    // ADD_SGEMM3_GM(128, 64, 32, 8, 4, 1, true, false);  // best for 2048
-    // ADD_SGEMM3_GM(64, 64, 32, 8, 4, 2, true, false);   // best for 4096
+    ADD_SGEMM3(32, 32, 128, 2, 4, 8, false, false, 1); // best for 128
+    ADD_SGEMM3(32, 32, 128, 2, 4, 8, true, false, 1);  // best for 256
+    ADD_SGEMM3(64, 64, 64, 4, 4, 8, true, false, 4);   // best for 512
+    ADD_SGEMM3(32, 64, 64, 4, 4, 8, true, false, 1);   // best for 1024
+    ADD_SGEMM3(128, 64, 32, 8, 4, 1, true, false, 1);  // best for 2048
+    ADD_SGEMM3(64, 64, 32, 8, 4, 2, true, false, 1);   // best for 4096
 
 #define ADD_SGEMM4(BM, BN, BK, WM, WN, WNITER, TM, TN, TK, PREFETCH_GLOBAL)                                            \
     do {                                                                                                               \
