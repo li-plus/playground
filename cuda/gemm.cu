@@ -66,15 +66,23 @@ static inline void sgemm2(int M, int N, int K, const float *A, const float *B, f
     sgemm2_kernel<BLOCK_DIM><<<grid_dim, block_dim>>>(M, N, K, A, B, C);
 }
 
-__device__ static inline float4 operator+(const float4 &a, const float4 &b) {
+__device__ __forceinline__ float4 operator+(const float4 &a, const float4 &b) {
     return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
 }
 
-__device__ static inline float4 &operator+=(float4 &self, const float4 &other) { return self = self + other; }
+__device__ __forceinline__ float4 &operator+=(float4 &self, const float4 &other) { return self = self + other; }
 
-__device__ static inline float4 operator*(const float4 &a, float s) {
+__device__ __forceinline__ float4 operator*(const float4 &a, float s) {
     return make_float4(a.x * s, a.y * s, a.z * s, a.w * s);
 }
+
+__device__ __forceinline__ float2 operator+(const float2 &a, const float2 &b) {
+    return make_float2(a.x + b.x, a.y + b.y);
+}
+
+__device__ __forceinline__ float2 &operator+=(float2 &self, const float2 &other) { return self = self + other; }
+
+__device__ __forceinline__ float2 operator*(const float2 &a, float s) { return make_float2(a.x * s, a.y * s); }
 
 template <size_t N>
 struct FloatN {
@@ -85,7 +93,7 @@ template <int BM, int BN, int BK, int TM, int TN, int TK, bool PREFETCH_GLOBAL, 
 __global__ void __launch_bounds__((BM / TM) * (BN / TN))
     sgemm3_kernel(int M, int N, int K, const float *__restrict__ A, const float *__restrict__ B,
                   float *__restrict__ C) {
-    static_assert(TN % 4 == 0); // float4
+    static_assert(TN == 1 || TN == 2 || TN % 4 == 0);
     static_assert(TK == 1 || TK == 2 || TK % 4 == 0);
 
     const int tx = threadIdx.x;
@@ -134,6 +142,9 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
 
     using float_tk = typename FloatN<TK>::type;
     constexpr size_t float_tk_n = sizeof(float_tk) / sizeof(float);
+
+    using float_tn = typename FloatN<TN>::type;
+    constexpr size_t float_tn_n = sizeof(float_tn) / sizeof(float);
 
     // constants & registers for prefetch
     constexpr int PREFETCH_A_STEPS_Y = BM / A_LOAD_TILE_Y;
@@ -232,25 +243,25 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
                     }
                 }
                 // each thread loads pBs[0:TK][0:TN] into Breg and compute matmul
-                float4 Breg[NUM_REG_BUF];
+                float_tn Breg[NUM_REG_BUF];
                 int reg_buf_idx = 0;
 #pragma unroll
                 for (int tk = 0; tk < TK; tk++) {
 #pragma unroll
-                    for (int tn = 0; tn < TN; tn += 4) {
+                    for (int tn = 0; tn < TN; tn += float_tn_n) {
                         if (!PREFETCH_SHARED || tk + tn == 0) {
-                            Breg[0] = *(float4 *)&pBs[tk * BN + tn];
+                            Breg[0] = *(float_tn *)&pBs[tk * BN + tn];
                         }
                         if constexpr (PREFETCH_SHARED) {
-                            if (tn + 4 < TN) {
-                                Breg[reg_buf_idx ^ 1] = *(float4 *)&pBs[tk * BN + tn + 4];
+                            if (tn + float_tn_n < TN) {
+                                Breg[reg_buf_idx ^ 1] = *(float_tn *)&pBs[tk * BN + tn + float_tn_n];
                             } else if (tk + 1 < TK) {
-                                Breg[reg_buf_idx ^ 1] = *(float4 *)&pBs[(tk + 1) * BN];
+                                Breg[reg_buf_idx ^ 1] = *(float_tn *)&pBs[(tk + 1) * BN];
                             }
                         }
 #pragma unroll
                         for (int tm = 0; tm < TM; tm++) {
-                            *(float4 *)&sums[tm * TN + tn] += Breg[reg_buf_idx] * Areg[tm * TK + tk];
+                            *(float_tn *)&sums[tm * TN + tn] += Breg[reg_buf_idx] * Areg[tm * TK + tk];
                         }
                         if constexpr (PREFETCH_SHARED) {
                             reg_buf_idx ^= 1;
@@ -263,8 +274,8 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
 #pragma unroll
                 for (int tk = 0; tk < TK; tk++) {
 #pragma unroll
-                    for (int tn = 0; tn < TN; tn += 4) {
-                        *(float4 *)&Breg[tk * TN + tn] = *(float4 *)&pBs[tk * BN + tn];
+                    for (int tn = 0; tn < TN; tn += float_tn_n) {
+                        *(float_tn *)&Breg[tk * TN + tn] = *(float_tn *)&pBs[tk * BN + tn];
                     }
                 }
                 // each thread loads pAs[0:TM][0:TK] into Areg and compute matmul
@@ -314,8 +325,8 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
 #pragma unroll
     for (int tm = 0; tm < TM; tm++) {
 #pragma unroll
-        for (int tn = 0; tn < TN; tn += 4) {
-            *(float4 *)&C[(by * BM + ty * TM + tm) * N + bx * BN + tx * TN + tn] = *(float4 *)&sums[tm * TN + tn];
+        for (int tn = 0; tn < TN; tn += float_tn_n) {
+            *(float_tn *)&C[(by * BM + ty * TM + tm) * N + bx * BN + tx * TN + tn] = *(float_tn *)&sums[tm * TN + tn];
         }
     }
 }
@@ -654,7 +665,10 @@ void perf(int M, int N, int K) {
     ADD_SGEMM3_PREFETCH_GLOBAL(BM, BN, BK, TM, TN, 2);                                                                 \
     ADD_SGEMM3_PREFETCH_GLOBAL(BM, BN, BK, TM, TN, 4)
 
-#define ADD_SGEMM3_TN(BM, BN, BK, TM) ADD_SGEMM3_TK(BM, BN, BK, TM, 4)
+#define ADD_SGEMM3_TN(BM, BN, BK, TM)                                                                                  \
+    ADD_SGEMM3_TK(BM, BN, BK, TM, 1);                                                                                  \
+    ADD_SGEMM3_TK(BM, BN, BK, TM, 2);                                                                                  \
+    ADD_SGEMM3_TK(BM, BN, BK, TM, 4)
 
 #define ADD_SGEMM3_TM(BM, BN, BK)                                                                                      \
     ADD_SGEMM3_TN(BM, BN, BK, 1);                                                                                      \
