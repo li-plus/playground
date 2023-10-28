@@ -185,11 +185,11 @@ int main() {
                                      }}};
 
     constexpr float bw_peak = V100SXM2Spec::PEAK_MEM_BW;
-    constexpr float total_mem = (M * N + M + N) * sizeof(float) / (float)GB;
+    constexpr float total_mem = (M * N + M + N) * sizeof(float);
     for (const auto &kernel : benchmark_kernels) {
         auto fn = [=] { kernel.fn(dA, dx, out_dy, M, N); };
         const float elapsed_ms = timeit(fn, 2, 10);
-        const float bw_actual = total_mem / (elapsed_ms / 1000);
+        const float bw_actual = total_mem / 1e9 / (elapsed_ms / 1e3);
         const float bw_util = bw_actual / bw_peak;
         printf("[%s] elapsed %.3f ms, bandwidth %.3f GB/s out of peak %.3f GB/s (%.3f%%)\n", kernel.name.c_str(),
                elapsed_ms, bw_actual, bw_peak, bw_util * 100);

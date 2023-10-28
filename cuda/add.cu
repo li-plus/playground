@@ -90,7 +90,7 @@ int main() {
         auto bench_fn = [=] { fn(dA, dB, dC, N); };
         float elapsed_ms = timeit(bench_fn, 2, 10);
         float bw_peak = V100SXM2Spec::PEAK_MEM_BW;
-        float bw_actual = 3 * N * sizeof(float) / (float)GB / (elapsed_ms / 1000);
+        float bw_actual = 3 * N * sizeof(float) / 1e9 / (elapsed_ms / 1000);
         float bw_util = bw_actual / bw_peak;
         printf("[%s] elapsed %.3f ms, bandwidth %.3f GB/s / peak %.3f GB/s (%.3f%%)\n", name.c_str(), elapsed_ms,
                bw_actual, bw_peak, bw_util * 100);
