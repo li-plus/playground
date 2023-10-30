@@ -122,8 +122,9 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
 
     float sums[TM * TN] = {};
 
-    A += by * BM * K; // move A to top-left corner of first row block
-    B += bx * BN;     // move B to top-left corner of first column block
+    A += by * BM * K;           // move A to top-left corner of first row block
+    B += bx * BN;               // move B to top-left corner of first column block
+    C += by * BM * N + bx * BN; // move C to the beginning of the result block
 
     constexpr int NUM_THREADS = (BM / TM) * (BN / TN);
 
@@ -186,8 +187,6 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
             }
         }
 
-        __syncthreads();
-
         const float *pAs = As[buf_idx] + ty * TM * BK;
         const float *pBs = Bs[buf_idx] + tx * TN;
 
@@ -198,10 +197,12 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
         const float *A_next = A + BK;
         const float *B_next = B + BK * N;
 
+        __syncthreads();
+
 #pragma unroll
         for (int bk = 0; bk < BK; bk += TK) {
-            if constexpr (PREFETCH_GLOBAL) {
-                if (k + BK < K && bk % (TK * PREFETCH_A_EVERY_BK_STEPS) == 0) {
+            if (PREFETCH_GLOBAL && k + BK < K) {
+                if (bk % (TK * PREFETCH_A_EVERY_BK_STEPS) == 0) {
                     // prefetch next float4 of As tile from global memory into register
                     const int A_prefetch_idx_start = bk / (TK * PREFETCH_A_EVERY_BK_STEPS) * PREFETCH_A_NUM_PER_STEP;
 #pragma unroll
@@ -215,7 +216,7 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
                         *(float4 *)&As[buf_idx][A_y * BK + A_x] = *(float4 *)&A_next[A_y * K + A_x];
                     }
                 }
-                if (k + BK < K && (bk + TK) % (TK * PREFETCH_B_EVERY_BK_STEPS) == 0) {
+                if ((bk + TK) % (TK * PREFETCH_B_EVERY_BK_STEPS) == 0) {
                     // prefetch next float4 of Bs tile from global memory into register (interleaved with As)
                     const int B_prefetch_idx_start = bk / (TK * PREFETCH_B_EVERY_BK_STEPS) * PREFETCH_B_NUM_PER_STEP;
 #pragma unroll
@@ -326,7 +327,7 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
     for (int tm = 0; tm < TM; tm++) {
 #pragma unroll
         for (int tn = 0; tn < TN; tn += float_tn_n) {
-            *(float_tn *)&C[(by * BM + ty * TM + tm) * N + bx * BN + tx * TN + tn] = *(float_tn *)&sums[tm * TN + tn];
+            *(float_tn *)&C[(ty * TM + tm) * N + tx * TN + tn] = *(float_tn *)&sums[tm * TN + tn];
         }
     }
 }
@@ -828,7 +829,7 @@ void perf(int M, int N, int K) {
 
         if (is_correct) {
             auto perf_fn = [=] { fn(M, N, K, dA, dB, dC1); };
-            const int warmup = 4096 / M;
+            const int warmup = std::max(4096 / M, 1);
             const int active = warmup * 4;
             const float elapsed_ms = timeit(perf_fn, warmup, active);
 

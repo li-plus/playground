@@ -15,17 +15,17 @@ Run benchmark:
 Best results on V100:
 ```
 ----- M=128 N=128 K=128 -----
-[best] (sgemm3<32, 32, 32, 2, 4, 1, true, false, 1>) vs cublas: 163.8%
+[best] (sgemm3<32, 32, 64, 4, 2, 4, true, true, 1>) vs cublas: 173.8% (0.005 vs 0.008 ms)
 ----- M=256 N=256 K=256 -----
-[best] (sgemm3<32, 32, 32, 2, 4, 1, true, false, 1>) vs cublas: 157.6%
+[best] (sgemm3<32, 32, 64, 4, 2, 4, true, true, 1>) vs cublas: 117.2% (0.007 vs 0.009 ms)
 ----- M=512 N=512 K=512 -----
-[best] (sgemm3<64, 64, 32, 4, 4, 1, true, false, 1>) vs cublas: 94.8%
+[best] (sgemm3<128, 32, 32, 8, 2, 4, true, true, 1>) vs cublas: 93.8% (0.030 vs 0.028 ms)
 ----- M=1024 N=1024 K=1024 -----
-[best] (sgemm3<32, 64, 32, 4, 4, 2, false, false, 8>) vs cublas: 98.2%
+[best] (sgemm3<128, 64, 32, 8, 4, 4, true, true, 1>) vs cublas: 98.0% (0.186 vs 0.182 ms)
 ----- M=2048 N=2048 K=2048 -----
-[best] (sgemm3<64, 64, 64, 4, 4, 8, true, false, 8>) vs cublas: 90.2%
+[best] (sgemm3<128, 64, 32, 8, 4, 4, true, true, 1>) vs cublas: 92.2% (1.277 vs 1.178 ms)
 ----- M=4096 N=4096 K=4096 -----
-[best] (sgemm3<128, 64, 32, 8, 4, 1, true, false, 4>) vs cublas: 96.7%
+[best] (sgemm3<128, 64, 32, 8, 4, 4, true, true, 1>) vs cublas: 98.9% (9.419 vs 9.319 ms)
 ```
 
 Best results on A100:

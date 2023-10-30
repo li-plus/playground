@@ -1,6 +1,8 @@
 """
 usage:
 torchrun --nproc_per_node 8 comm_overlap.py
+
+open profiler logs with: https://ui.perfetto.dev/
 """
 
 import torch
@@ -16,8 +18,8 @@ torch.cuda.set_device(rank)
 with torch.profiler.profile(
     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
     schedule=torch.profiler.schedule(wait=1, warmup=3, active=4, repeat=1),
-    on_trace_ready=torch.profiler.tensorboard_trace_handler(f"log/non_overlap/rank_{rank}", use_gzip=False),
-    record_shapes=False, profile_memory=False, with_stack=False, with_flops=False, with_modules=False,
+    on_trace_ready=torch.profiler.tensorboard_trace_handler(f"log/non_overlap/rank_{rank}", use_gzip=True),
+    record_shapes=True, profile_memory=True, with_stack=True, with_flops=True, with_modules=True,
 ) as p:
     a = torch.ones(1024 // world_size, 1024, dtype=torch.float32, device='cuda')
     b = torch.empty(1024, 1024, dtype=torch.float32, device='cuda')
@@ -33,8 +35,8 @@ with torch.profiler.profile(
 with torch.profiler.profile(
     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
     schedule=torch.profiler.schedule(wait=1, warmup=3, active=4, repeat=1),
-    on_trace_ready=torch.profiler.tensorboard_trace_handler(f"log/overlap/rank_{rank}", use_gzip=False),
-    record_shapes=False, profile_memory=False, with_stack=False, with_flops=False, with_modules=False,
+    on_trace_ready=torch.profiler.tensorboard_trace_handler(f"log/overlap/rank_{rank}", use_gzip=True),
+    record_shapes=True, profile_memory=True, with_stack=True, with_flops=True, with_modules=True,
 ) as p:
     a = torch.ones(1024 // world_size, 1024, dtype=torch.float32, device='cuda')
     b = torch.empty(1024, 1024, dtype=torch.float32, device='cuda')
