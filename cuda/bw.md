@@ -1,6 +1,6 @@
 # NCCL
 
-nccl tests:
+nccl tests: https://github.com/NVIDIA/nccl-tests
 
 Tested on 8 A100 NVLink GPUs with 600GB/s bi-directional bandwidth (300GB/s TX & 300GB/s RX):
 ```
@@ -16,3 +16,22 @@ Tested on 8 A100 NVLink GPUs with 600GB/s bi-directional bandwidth (300GB/s TX &
 ```
 
 Note that 195GB/s is uni-directional, meaning that one GPU can simultaneously send and receive 195GB data within one second.
+
+Performance explanation: https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md
+
+# Bandwidth Test
+
+https://github.com/NVIDIA/cuda-samples/tree/master/Samples/1_Utilities/bandwidthTest
+
+# CPU Memory bandwidth
+
+```sh
+sudo apt install mbw
+```
+
+```
+$ mbw 2048
+AVG     Method: MEMCPY  Elapsed: 0.82003        MiB: 2048.00000 Copy: 2497.478 MiB/s
+AVG     Method: DUMB    Elapsed: 0.23962        MiB: 2048.00000 Copy: 8546.830 MiB/s
+AVG     Method: MCBLOCK Elapsed: 0.19531        MiB: 2048.00000 Copy: 10485.808 MiB/s
+```

@@ -49,7 +49,7 @@ with torch.profiler.profile(
             handle, next_handle = next_handle, handle
             if mini_step < 16 - 1:
                 next_handle = dist.all_gather_into_tensor(next_b, a, async_op=True)
-            handle.wait()
+            handle.wait()   # insert a sync event in the main cuda stream
             b @ b
         torch.cuda.synchronize()
         p.step()

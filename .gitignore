@@ -5,3 +5,9 @@ cmake-build-debug/
 # ide
 .vscode/
 .idea/
+
+# clangd
+.cache/
+
+# trace output
+*.pt.trace.json.gz
