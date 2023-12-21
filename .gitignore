@@ -10,4 +10,4 @@ cmake-build-debug/
 .cache/
 
 # trace output
-*.pt.trace.json.gz
+# *.pt.trace.json.gz
