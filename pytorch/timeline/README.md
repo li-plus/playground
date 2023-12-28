@@ -2,11 +2,13 @@
 
 ## PyTorch DDP
 
-Traced against https://github.com/pytorch/examples/blob/main/imagenet/main.py on 8x V100 for 4 training steps.
-
+Traced against https://github.com/pytorch/examples/blob/main/imagenet/main.py on 8x V100 for 4 training steps. See https://pytorch.org/docs/master/notes/ddp.html for implementation details.
 ```sh
 python main.py -a resnet50 --dist-url 'tcp://127.0.0.1:23456' --dist-backend 'nccl' --multiprocessing-distributed --world-size 1 --rank 0 --dummy
 ```
+
+Note:
+* Gradients in a bucket are copied to a contiguous buffer. Only one allreduce kernel is needed for each bucket.
 
 ## PyTorch AMP
 
@@ -15,26 +17,89 @@ AMP Ref: https://github.com/pytorch/vision/blob/main/references/classification/t
 ## DeepSpeed Zero
 
 Traced against [DeepSpeed-Chat](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat) without `overlap_comm`.
-
 ```sh
 git clone https://github.com/microsoft/DeepSpeedExamples.git
 cd DeepSpeedExamples/applications/DeepSpeed-Chat/training/step1_supervised_finetuning
 ```
 
-Zero 1
+Default DeepSpeed Zero config:
+```json
+{
+    "stage": 1,
+    "overlap_comm": true,
+    "reduce_scatter": true,
+    "contiguous_gradients": true,
+}
+```
 
+**Zero 1: partition optimizer (12 bytes for each params: 4B fp32 param + 4B 1st momentum + 4B 2nd momentum)**
 ```sh
 bash training_scripts/opt/single_node/run_1.3b.sh ./output 1
 ```
 
-Zero 2
+Initialization:
+* FP32 params are flattened, packed, and then evenly partitioned across DP group (`single_partition_of_fp32_groups`). Rank 0 holds the first 1/n flat params, rank1 holds the 1/n to 2/n params, and so on.
+* Set local optimizer to have flat params of its own partition (`param_group['params'] = [self.single_partition_of_fp32_groups[i]]`)
+* In `initialize_optimizer_states`, call `optimizer.step()` so that Adam states (1st & 2nd momentum) are also partitioned.
+* FP16 params are flattened but un-partitioned (`bit16_groups_flat`)
+* Zero1 forces `overlap_comm=False`, `contiguous_gradients=False`. 
+* FP16 uses dynamic loss scaler. BF16 does not use loss scaler.
 
+Forward: local forward.
+
+Backward: backward the entire graph first, and then allreduce all gradients. No overlap of backward & gradient allreduce. See `reduce_gradients`.
+
+Optimize:
+* Update local partition of params.
+* Allgather the updated model param partitions across dp group.
+
+**Zero 2: partition gradients (2 bytes for each params)**
 ```sh
 bash training_scripts/opt/single_node/run_1.3b.sh ./output 2
 ```
 
-Zero 3
+Initialization:
+* Similar to zero 1, but with `partition_gradients=True`.
+* Gradient hooks are registered (`register_hook`) to launch allreduce once gradient bucket is ready. May overlap gradient allreduce and backward.
 
+Forward: same as zero1.
+
+Backward:
+* Difference with Zero1: [[code]](https://github.com/microsoft/DeepSpeed/blob/c37fe9cbfb8bc10c8dd6ccd8cac9b34ded218990/deepspeed/runtime/zero/stage_1_and_2.py#L1353-L1367)
+* Backward to compute local gradients, which are allreduced once their bucket is ready. Then, if a param lies in the local partition, its allreduced gradient is copied to the local gradients buffer (`copy_grads_in_partition`). Otherwise, its gradients are cleared (`clear_grad_attribute`). Note that Zero 1 does not clear any gradient.
+
+Optimize: same as zero1.
+
+**Zero 3: partition model params**
 ```sh
 bash training_scripts/opt/single_node/run_1.3b.sh ./output 3
 ```
+
+Initialization:
+* Each FP16 model param (2B/param) is partitioned across dp group (`_partition_param`) into `param.ds_tensor`. The original `param.data` is released (`free_param`).
+* Register module forward & backward hooks (`register_forward_hook`, `register_forward_pre_hook`). Make sure model params are allgathered before forward and partitioned after forward.
+* For optimizer, `_create_fp32_partitions` creates FP32 param partition (4B/param) and its gradient (4B/param). `initialize_optimizer_states` creates FP32 adam 1st and 2nd momentum vectors (8B/param)
+* After initialization, exactly 18 bytes for each param are allocated and are evenly partitioned across dp group. During runtime, FP16 gradients (2B/param) are allocated for backward and freed after optimizer step.
+
+Forward:
+* Allgather module params and wait till status turns AVAILABLE (`fetch_sub_module`).
+* Prefetch next module params up to `stage3_max_live_parameters` numels. Their status become INFLIGHT. The async allgather handles are kept in param status.
+* Run normal module forward function to transform activation.
+* Partition all params (`release_sub_module`) that will be reused beyond `stage3_max_reuse_distance`.
+
+Backward:
+* Allgather module params.
+* Run backward to get local gradients (un-partitioned) of params and inputs.
+* The gradient hook (`reduce_ready_partitions_and_remove_grads`) copies full gradients to a continuous flat buffer (`__add_grad_to_ipg_bucket`) and triggers reduce-scatter for any ready bucket (`__reduce_and_partition_ipg_grads`). Eventually each rank has its own partition of gradients.
+
+Optimize:
+* Convert contiguous fp16 gradients to fp32 gradients (`_prepare_fp32_grad_for_sub_group`) and release fp16 gradients.
+* Scale fp32 gradients and do gradient clip (`unscale_and_clip_grads`).
+* Bind contiguous fp32 gradients to flat fp32 param groups and call optimizer.step (`_optimizer_step`).
+* Copy updated flat fp32 params to flat fp16 params and then link separate fp16 params to views of flat params (`_reassign_or_swap_out_partitioned_parameters`).
+* Release fp32 gradients (`_release_sub_group`).
+* Allgather persisting parameters (`_post_step`).
+
+Reference:
+* https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/runtime/zero/stage_1_and_2.py
+* https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/runtime/zero/stage3.py
