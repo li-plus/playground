@@ -19,10 +19,14 @@ with torch.profiler.profile(
     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
     schedule=torch.profiler.schedule(wait=1, warmup=3, active=4, repeat=1),
     on_trace_ready=torch.profiler.tensorboard_trace_handler(f"log/non_overlap/rank_{rank}", use_gzip=True),
-    record_shapes=True, profile_memory=True, with_stack=True, with_flops=True, with_modules=True,
+    record_shapes=True,
+    profile_memory=True,
+    with_stack=True,
+    with_flops=True,
+    with_modules=True,
 ) as p:
-    a = torch.ones(1024 // world_size, 1024, dtype=torch.float32, device='cuda')
-    b = torch.empty(1024, 1024, dtype=torch.float32, device='cuda')
+    a = torch.ones(1024 // world_size, 1024, dtype=torch.float32, device="cuda")
+    b = torch.empty(1024, 1024, dtype=torch.float32, device="cuda")
     for step in range(8):
         for mini_step in range(16):
             dist.all_gather_into_tensor(b, a)
@@ -36,10 +40,14 @@ with torch.profiler.profile(
     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
     schedule=torch.profiler.schedule(wait=1, warmup=3, active=4, repeat=1),
     on_trace_ready=torch.profiler.tensorboard_trace_handler(f"log/overlap/rank_{rank}", use_gzip=True),
-    record_shapes=True, profile_memory=True, with_stack=True, with_flops=True, with_modules=True,
+    record_shapes=True,
+    profile_memory=True,
+    with_stack=True,
+    with_flops=True,
+    with_modules=True,
 ) as p:
-    a = torch.ones(1024 // world_size, 1024, dtype=torch.float32, device='cuda')
-    b = torch.empty(1024, 1024, dtype=torch.float32, device='cuda')
+    a = torch.ones(1024 // world_size, 1024, dtype=torch.float32, device="cuda")
+    b = torch.empty(1024, 1024, dtype=torch.float32, device="cuda")
     next_b = torch.empty_like(b)
     for step in range(8):
         handle = None
@@ -49,7 +57,7 @@ with torch.profiler.profile(
             handle, next_handle = next_handle, handle
             if mini_step < 16 - 1:
                 next_handle = dist.all_gather_into_tensor(next_b, a, async_op=True)
-            handle.wait()   # insert a sync event in the main cuda stream
+            handle.wait()  # insert a sync event in the main cuda stream
             b @ b
         torch.cuda.synchronize()
         p.step()

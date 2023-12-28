@@ -31,8 +31,8 @@ def multi_stream(matrices, streams):
 
 
 torch.cuda.set_device(0)
-matrices = [torch.randn(2048, 128, device='cuda') for _ in range(128)]
+matrices = [torch.randn(2048, 128, device="cuda") for _ in range(128)]
 streams = [torch.cuda.Stream(torch.cuda.current_device()) for _ in range(2)]
 
-print(Timer(stmt='single_stream(matrices)', globals=globals()).timeit(10))
-print(Timer(stmt='multi_stream(matrices, streams)', globals=globals()).timeit(10))
+print(Timer(stmt="single_stream(matrices)", globals=globals()).timeit(10))
+print(Timer(stmt="multi_stream(matrices, streams)", globals=globals()).timeit(10))
