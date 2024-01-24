@@ -103,3 +103,48 @@ Optimize:
 Reference:
 * https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/runtime/zero/stage_1_and_2.py
 * https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/runtime/zero/stage3.py
+
+## Megatron-LM
+
+* https://github.com/NVIDIA/Megatron-LM
+* https://huggingface.co/blog/megatron-training
+
+Download tokenizer:
+```sh
+wget https://s3.amazonaws.com/models.huggingface.co/bert/gpt2-vocab.json
+wget https://s3.amazonaws.com/models.huggingface.co/bert/gpt2-merges.txt
+```
+
+Download and pre-process wikitext2 dataset.
+```python
+from datasets import load_dataset
+
+dataset = load_dataset(path="wikitext", name="wikitext-2-v1", split="train")
+dataset.to_json("wikitext2.json", lines=True)
+```
+
+```sh
+python3 tools/preprocess_data.py \
+        --input wikitext2.json \
+        --output-prefix wikitext2 \
+        --vocab-file gpt2-vocab.json \
+        --tokenizer-type GPT2BPETokenizer \
+        --merge-file gpt2-merges.txt \
+        --append-eod \
+        --workers 96
+```
+
+Modify the entrypoint `pretrain_gpt_distributed_with_mp.sh`:
+```sh
+CHECKPOINT_PATH=./output/
+VOCAB_FILE=./gpt2-vocab.json
+MERGE_FILE=./gpt2-merges.txt
+DATA_PATH=wikitext2_text_document
+```
+
+Add `--use-flash-attn` and `--bf16` options.
+
+Start training.
+```sh
+bash examples/pretrain_gpt_distributed_with_mp.sh
+```
