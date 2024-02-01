@@ -142,9 +142,9 @@ MERGE_FILE=./gpt2-merges.txt
 DATA_PATH=wikitext2_text_document
 ```
 
-Add `--use-flash-attn` and `--bf16` options.
+Add extra options: `--use-flash-attn --bf16 --use-distributed-optimizer`
 
-Start training.
+Start training (TP=2 PP=2 DP=2)
 ```sh
 bash examples/pretrain_gpt_distributed_with_mp.sh
 ```
