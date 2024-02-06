@@ -1,0 +1,33 @@
+services:
+  dev:
+    image: nvidia/cuda:12.2.0-devel-ubuntu20.04
+    # build: .
+    stdin_open: true    # -i
+    tty: true           # -t
+    network_mode: host  # --network=host
+    volumes:
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/passwd:/etc/passwd:ro
+      - /etc/group:/etc/group:ro
+      - /etc/shadow:/etc/shadow:ro
+      - ${HOST_HOME}:${HOST_HOME}
+    cap_add:
+      - ALL
+    shm_size: 16gb
+    command:
+      - bash
+      - -c
+      - |
+        echo "${HOST_USER}   ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers
+        sed -i 's/^#Port 22$/Port 2222/g' /etc/ssh/sshd_config
+        service ssh start
+        exec bash
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 8
+              capabilities: [gpu]
+    working_dir: ${HOST_HOME}
