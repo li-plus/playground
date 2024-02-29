@@ -1,8 +1,6 @@
-#include <torch/extension.h>
-
 #include <cuda.h>
 #include <cuda_runtime.h>
-
+#include <torch/extension.h>
 #include <vector>
 
 #define WARP_SIZE 32
@@ -131,11 +129,13 @@ torch::Tensor rms_norm_cuda_forward(torch::Tensor input, torch::Tensor weight, f
 }
 
 template <int BLOCK_SIZE = 256, int ILP = 4>
-static __global__ void rms_norm_cuda_backward_kernel(const float *grad_output, float *grad_input, float *grad_weight,
-                                                     const float *input, const float *weight, int normalized_shape,
-                                                     float eps) {
+static __global__ void
+rms_norm_cuda_backward_kernel(const float *__restrict__ grad_output, float *__restrict__ grad_input,
+                              float *__restrict__ grad_weight_partial, const float *__restrict__ input,
+                              const float *__restrict__ weight, int normalized_shape, float eps) {
     const float *grad_output_row = grad_output + blockIdx.x * normalized_shape;
     float *grad_input_row = grad_input + blockIdx.x * normalized_shape;
+    float *grad_weight_partial_row = grad_weight_partial + blockIdx.x * normalized_shape;
     const float *input_row = input + blockIdx.x * normalized_shape;
 
     float2 sum_vars[ILP]{};
@@ -162,7 +162,7 @@ static __global__ void rms_norm_cuda_backward_kernel(const float *grad_output, f
     const float variance = sum_var.y;
 
     const float rrms = rsqrtf(variance / normalized_shape + eps);
-    const float coef = sum * rrms * rrms * rrms / normalized_shape;
+    const float coef = (sum * rrms) * (rrms * rrms) / normalized_shape;
 
     for (int col_start = threadIdx.x; col_start < normalized_shape; col_start += BLOCK_SIZE * ILP) {
 #pragma unroll
@@ -170,9 +170,9 @@ static __global__ void rms_norm_cuda_backward_kernel(const float *grad_output, f
             const int col = col_start + i * BLOCK_SIZE;
             if (col < normalized_shape) {
                 const float x = input_row[col];
-                const float grad_output_val = grad_output_row[col];
-                grad_input_row[col] = grad_output_val * rrms * weight[col] - coef * x;
-                atomicAdd(grad_weight + col, grad_output_val * x * rrms);
+                const float grad_output_rrms = grad_output_row[col] * rrms;
+                grad_input_row[col] = grad_output_rrms * weight[col] - coef * x;
+                grad_weight_partial_row[col] = grad_output_rrms * x;
             }
         }
     }
@@ -181,14 +181,14 @@ static __global__ void rms_norm_cuda_backward_kernel(const float *grad_output, f
 std::vector<torch::Tensor> rms_norm_cuda_backward(torch::Tensor grad_output, torch::Tensor input, torch::Tensor weight,
                                                   float eps) {
     torch::Tensor grad_input = torch::empty_like(input);
-    torch::Tensor grad_weight = torch::zeros_like(weight);
+    torch::Tensor grad_weight_partial = torch::empty_like(input);
     const int normalized_shape = input.size(-1);
     const int blocks = input.numel() / normalized_shape;
 
 #define rms_norm_cuda_backward_kernel_launch(BLOCK_SIZE, ILP)                                                          \
     rms_norm_cuda_backward_kernel<BLOCK_SIZE, ILP>                                                                     \
         <<<blocks, BLOCK_SIZE>>>(grad_output.const_data_ptr<float>(), grad_input.mutable_data_ptr<float>(),            \
-                                 grad_weight.mutable_data_ptr<float>(), input.const_data_ptr<float>(),                 \
+                                 grad_weight_partial.mutable_data_ptr<float>(), input.const_data_ptr<float>(),         \
                                  weight.const_data_ptr<float>(), normalized_shape, eps)
 
     if (normalized_shape <= 32) {
@@ -210,6 +210,8 @@ std::vector<torch::Tensor> rms_norm_cuda_backward(torch::Tensor grad_output, tor
     }
 
 #undef rms_norm_cuda_backward_kernel_launch
+
+    torch::Tensor grad_weight = grad_weight_partial.view({-1, normalized_shape}).sum(0);
 
     return {grad_input, grad_weight};
 }

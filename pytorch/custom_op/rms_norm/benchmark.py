@@ -36,8 +36,14 @@ def main():
     batch_size = 64
     eps = 1e-6
 
-    for seq_len in (128, 512, 2048):
-        for hidden_size in (32, 61, 64, 128, 131, 256, 512, 1024, 1027, 2048, 4096):
+    seq_len_choices = (128, 512, 2048)
+    hidden_size_choices = (32, 61, 64, 128, 131, 256, 512, 1024, 1027, 2048, 4096)
+
+    # seq_len_choices = (128,)
+    # hidden_size_choices = (4096,)
+
+    for seq_len in seq_len_choices:
+        for hidden_size in hidden_size_choices:
             weight = (torch.randn(hidden_size, device="cuda") + 1).requires_grad_(True)
             hidden_states = torch.randn(batch_size, seq_len, hidden_size, device="cuda", requires_grad=True)
 
@@ -84,31 +90,31 @@ def main():
             table = []
 
             stats = Timer("rms_norm_naive(hidden_states, weight, eps)", globals={**globals(), **locals()}).timeit(10)
-            table.append([batch_size, seq_len, hidden_size, "rms_norm_naive", f"{stats.mean*1e3:.3f} ms"])
+            table.append([hidden_states.shape, "rms_norm_naive", f"{stats.mean*1e3:.3f} ms"])
 
             stats = Timer("rms_norm_ts(hidden_states, weight, eps)", globals={**globals(), **locals()}).timeit(10)
-            table.append([batch_size, seq_len, hidden_size, "rms_norm_ts", f"{stats.mean*1e3:.3f} ms"])
+            table.append([hidden_states.shape, "rms_norm_ts", f"{stats.mean*1e3:.3f} ms"])
 
             stats = Timer("rms_norm_triton(hidden_states, weight, eps)", globals={**globals(), **locals()}).timeit(10)
-            table.append([batch_size, seq_len, hidden_size, "rms_norm_triton", f"{stats.mean*1e3:.3f} ms"])
+            table.append([hidden_states.shape, "rms_norm_triton", f"{stats.mean*1e3:.3f} ms"])
 
             stats = Timer("rms_norm_cuda(hidden_states, weight, eps)", globals={**globals(), **locals()}).timeit(10)
-            table.append([batch_size, seq_len, hidden_size, "rms_norm_cuda", f"{stats.mean*1e3:.3f} ms"])
+            table.append([hidden_states.shape, "rms_norm_cuda", f"{stats.mean*1e3:.3f} ms"])
 
             # backward benchmark
             stats = Timer("naive_loss.backward(retain_graph=True)", globals={**globals(), **locals()}).timeit(10)
-            table.append([batch_size, seq_len, hidden_size, "rms_norm_naive_backward", f"{stats.mean*1e3:.3f} ms"])
+            table.append([hidden_states.shape, "rms_norm_naive_backward", f"{stats.mean*1e3:.3f} ms"])
 
             stats = Timer("ts_loss.backward(retain_graph=True)", globals={**globals(), **locals()}).timeit(10)
-            table.append([batch_size, seq_len, hidden_size, "rms_norm_ts_backward", f"{stats.mean*1e3:.3f} ms"])
+            table.append([hidden_states.shape, "rms_norm_ts_backward", f"{stats.mean*1e3:.3f} ms"])
 
             stats = Timer("triton_loss.backward(retain_graph=True)", globals={**globals(), **locals()}).timeit(10)
-            table.append([batch_size, seq_len, hidden_size, "rms_norm_triton_backward", f"{stats.mean*1e3:.3f} ms"])
+            table.append([hidden_states.shape, "rms_norm_triton_backward", f"{stats.mean*1e3:.3f} ms"])
 
             stats = Timer("cuda_loss.backward(retain_graph=True)", globals={**globals(), **locals()}).timeit(10)
-            table.append([batch_size, seq_len, hidden_size, "rms_norm_cuda_backward", f"{stats.mean*1e3:.3f} ms"])
+            table.append([hidden_states.shape, "rms_norm_cuda_backward", f"{stats.mean*1e3:.3f} ms"])
 
-            print(tabulate(table, headers=["bs", "seqlen", "hidden", "impl", "time"], tablefmt="psql"))
+            print(tabulate(table, headers=["shape", "impl", "time"], tablefmt="psql"))
 
 
 if __name__ == "__main__":
