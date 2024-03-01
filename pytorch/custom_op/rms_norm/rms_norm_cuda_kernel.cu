@@ -5,7 +5,17 @@
 
 #define WARP_SIZE 32
 
-static inline int ceil_div(int a, int b) { return (a + b - 1) / b; }
+// Copied from https://github.com/Dao-AILab/flash-attention/blob/main/csrc/flash_attn/src/static_switch.h
+#define BOOL_SWITCH(COND, CONST_NAME, ...)                                                                             \
+    [&] {                                                                                                              \
+        if (COND) {                                                                                                    \
+            constexpr static bool CONST_NAME = true;                                                                   \
+            return __VA_ARGS__();                                                                                      \
+        } else {                                                                                                       \
+            constexpr static bool CONST_NAME = false;                                                                  \
+            return __VA_ARGS__();                                                                                      \
+        }                                                                                                              \
+    }()
 
 static __device__ __forceinline__ float warp_reduce_sum(float x) {
 #pragma unroll
@@ -58,20 +68,66 @@ static __device__ __forceinline__ float2 block_reduce_sum(float2 v) {
     return v;
 }
 
-template <int BLOCK_SIZE = 256, int ILP = 4>
+// float4 utils
+static __device__ __forceinline__ float4 operator*(const float4 &self, float other) {
+    return make_float4(self.x * other, self.y * other, self.z * other, self.w * other);
+}
+
+static __device__ __forceinline__ float4 operator*(float self, const float4 &other) { return other * self; }
+
+static __device__ __forceinline__ float4 operator*(const float4 &self, const float4 &other) {
+    return make_float4(self.x * other.x, self.y * other.y, self.z * other.z, self.w * other.w);
+}
+
+static __device__ __forceinline__ float4 operator+(const float4 &self, const float4 &other) {
+    return make_float4(self.x + other.x, self.y + other.y, self.z + other.z, self.w + other.w);
+}
+
+static __device__ __forceinline__ float4 operator+=(float4 &self, const float4 &other) { return self = self + other; }
+
+static __device__ __forceinline__ float4 operator-(const float4 &self, const float4 &other) {
+    return make_float4(self.x - other.x, self.y - other.y, self.z - other.z, self.w - other.w);
+}
+
+// float2 utils
+static __device__ __forceinline__ float2 operator*(const float2 &self, float other) {
+    return make_float2(self.x * other, self.y * other);
+}
+
+static __device__ __forceinline__ float2 operator*(float self, const float2 &other) { return other * self; }
+
+static __device__ __forceinline__ float2 operator*(const float2 &self, const float2 &other) {
+    return make_float2(self.x * other.x, self.y * other.y);
+}
+
+static __device__ __forceinline__ float2 operator+(const float2 &self, const float2 &other) {
+    return make_float2(self.x + other.x, self.y + other.y);
+}
+
+static __device__ __forceinline__ float2 operator+=(float2 &self, const float2 &other) { return self = self + other; }
+
+static __device__ __forceinline__ float2 operator-(const float2 &self, const float2 &other) {
+    return make_float2(self.x - other.x, self.y - other.y);
+}
+
+template <int BLOCK_SIZE = 256, int ILP = 4, int FLOAT_ALIGN = 1>
 static __global__ void rms_norm_cuda_forward_kernel(const float *__restrict__ input, const float *__restrict__ weight,
                                                     float *__restrict__ output, int normalized_shape, float eps) {
     const float *input_row = input + blockIdx.x * normalized_shape;
     float *output_row = output + blockIdx.x * normalized_shape;
 
+    constexpr int N = std::min(FLOAT_ALIGN, ILP);
+    static_assert(ILP % N == 0);
+    using floatN = std::conditional_t<N == 4, float4, std::conditional_t<N == 2, float2, float>>;
+
     float variances[ILP]{};
-    for (int col_start = threadIdx.x; col_start < normalized_shape; col_start += BLOCK_SIZE * ILP) {
+    for (int col_start = threadIdx.x * N; col_start < normalized_shape; col_start += BLOCK_SIZE * ILP) {
 #pragma unroll
-        for (int i = 0; i < ILP; i++) {
+        for (int i = 0; i < ILP; i += N) {
             const int col = col_start + i * BLOCK_SIZE;
             if (col < normalized_shape) {
-                const float x = input_row[col];
-                variances[i] += x * x;
+                const floatN x = *(floatN *)&input_row[col];
+                *(floatN *)&variances[i] += x * x;
             }
         }
     }
@@ -84,12 +140,12 @@ static __global__ void rms_norm_cuda_forward_kernel(const float *__restrict__ in
     variance = block_reduce_sum<BLOCK_SIZE>(variance);
     const float rrms = rsqrtf(variance / normalized_shape + eps);
 
-    for (int col_start = threadIdx.x; col_start < normalized_shape; col_start += BLOCK_SIZE * ILP) {
+    for (int col_start = threadIdx.x * N; col_start < normalized_shape; col_start += BLOCK_SIZE * ILP) {
 #pragma unroll
-        for (int i = 0; i < ILP; i++) {
+        for (int i = 0; i < ILP; i += N) {
             const int col = col_start + i * BLOCK_SIZE;
             if (col < normalized_shape) {
-                output_row[col] = rrms * input_row[col] * weight[col];
+                *(floatN *)&output_row[col] = rrms * *(floatN *)&input_row[col] * *(floatN *)&weight[col];
             }
         }
     }
@@ -100,35 +156,42 @@ torch::Tensor rms_norm_cuda_forward(torch::Tensor input, torch::Tensor weight, f
     const int normalized_shape = input.size(-1);
     const int blocks = input.numel() / normalized_shape;
 
-#define rms_norm_cuda_forward_kernel_launch(BLOCK_SIZE, ILP)                                                           \
-    rms_norm_cuda_forward_kernel<BLOCK_SIZE, ILP>                                                                      \
+#define rms_norm_cuda_forward_kernel_launch(BLOCK_SIZE, ILP, FLOAT_ALIGN)                                              \
+    rms_norm_cuda_forward_kernel<BLOCK_SIZE, ILP, FLOAT_ALIGN>                                                         \
         <<<blocks, BLOCK_SIZE>>>(input.const_data_ptr<float>(), weight.const_data_ptr<float>(),                        \
                                  output.mutable_data_ptr<float>(), normalized_shape, eps)
 
-    if (normalized_shape <= 32) {
-        rms_norm_cuda_forward_kernel_launch(32, 1);
-    } else if (normalized_shape <= 64) {
-        rms_norm_cuda_forward_kernel_launch(32, 2);
-    } else if (normalized_shape <= 128) {
-        rms_norm_cuda_forward_kernel_launch(32, 4);
-    } else if (normalized_shape <= 256) {
-        rms_norm_cuda_forward_kernel_launch(64, 4);
-    } else if (normalized_shape <= 512) {
-        rms_norm_cuda_forward_kernel_launch(128, 4);
-    } else if (normalized_shape <= 1024) {
-        rms_norm_cuda_forward_kernel_launch(256, 4);
-    } else if (normalized_shape <= 2048) {
-        rms_norm_cuda_forward_kernel_launch(512, 4);
-    } else {
-        rms_norm_cuda_forward_kernel_launch(1024, 4);
-    }
+    BOOL_SWITCH(normalized_shape % 4 == 0, FLOAT_ALIGN4, [&] {
+        BOOL_SWITCH(normalized_shape % 2 == 0, FLOAT_ALIGN2, [&] {
+            constexpr int FLOAT_ALIGN = FLOAT_ALIGN4 ? 4 : (FLOAT_ALIGN2 ? 2 : 1);
+            if (normalized_shape <= 32) {
+                rms_norm_cuda_forward_kernel_launch(32, 1, FLOAT_ALIGN);
+            } else if (normalized_shape <= 64) {
+                rms_norm_cuda_forward_kernel_launch(32, 2, FLOAT_ALIGN);
+            } else if (normalized_shape <= 128) {
+                rms_norm_cuda_forward_kernel_launch(32, 4, FLOAT_ALIGN);
+            } else if (normalized_shape <= 256) {
+                rms_norm_cuda_forward_kernel_launch(64, 4, FLOAT_ALIGN);
+            } else if (normalized_shape <= 512) {
+                rms_norm_cuda_forward_kernel_launch(128, 4, FLOAT_ALIGN);
+            } else if (normalized_shape <= 1024) {
+                rms_norm_cuda_forward_kernel_launch(256, 4, FLOAT_ALIGN);
+            } else if (normalized_shape <= 2048) {
+                rms_norm_cuda_forward_kernel_launch(512, 4, FLOAT_ALIGN);
+            } else if (normalized_shape <= 4096) {
+                rms_norm_cuda_forward_kernel_launch(1024, 4, FLOAT_ALIGN);
+            } else {
+                rms_norm_cuda_forward_kernel_launch(1024, 8, FLOAT_ALIGN);
+            }
+        });
+    });
 
 #undef rms_norm_cuda_forward_kernel_launch
 
     return output;
 }
 
-template <int BLOCK_SIZE = 256, int ILP = 4>
+template <int BLOCK_SIZE = 256, int ILP = 4, int FLOAT_ALIGN = 1>
 static __global__ void
 rms_norm_cuda_backward_kernel(const float *__restrict__ grad_output, float *__restrict__ grad_input,
                               float *__restrict__ grad_weight_partial, const float *__restrict__ input,
@@ -138,15 +201,20 @@ rms_norm_cuda_backward_kernel(const float *__restrict__ grad_output, float *__re
     float *grad_weight_partial_row = grad_weight_partial + blockIdx.x * normalized_shape;
     const float *input_row = input + blockIdx.x * normalized_shape;
 
-    float2 sum_vars[ILP]{};
-    for (int col_start = threadIdx.x; col_start < normalized_shape; col_start += BLOCK_SIZE * ILP) {
+    constexpr int N = std::min(FLOAT_ALIGN, ILP);
+    static_assert(ILP % N == 0);
+    using floatN = std::conditional_t<N == 4, float4, std::conditional_t<N == 2, float2, float>>;
+
+    float sums[ILP]{};
+    float vars[ILP]{};
+    for (int col_start = threadIdx.x * N; col_start < normalized_shape; col_start += BLOCK_SIZE * ILP) {
 #pragma unroll
-        for (int i = 0; i < ILP; i++) {
+        for (int i = 0; i < ILP; i += N) {
             const int col = col_start + i * BLOCK_SIZE;
             if (col < normalized_shape) {
-                const float x = input_row[col];
-                sum_vars[i].x += x * weight[col] * grad_output_row[col];
-                sum_vars[i].y += x * x;
+                const floatN x = *(floatN *)&input_row[col];
+                *(floatN *)&sums[i] += x * *(floatN *)&weight[col] * *(floatN *)&grad_output_row[col];
+                *(floatN *)&vars[i] += x * x;
             }
         }
     }
@@ -154,8 +222,8 @@ rms_norm_cuda_backward_kernel(const float *__restrict__ grad_output, float *__re
     float2 sum_var = make_float2(0.f, 0.f);
 #pragma unroll
     for (int i = 0; i < ILP; i++) {
-        sum_var.x += sum_vars[i].x;
-        sum_var.y += sum_vars[i].y;
+        sum_var.x += sums[i];
+        sum_var.y += vars[i];
     }
     sum_var = block_reduce_sum<BLOCK_SIZE>(sum_var);
     const float sum = sum_var.x;
@@ -164,15 +232,15 @@ rms_norm_cuda_backward_kernel(const float *__restrict__ grad_output, float *__re
     const float rrms = rsqrtf(variance / normalized_shape + eps);
     const float coef = (sum * rrms) * (rrms * rrms) / normalized_shape;
 
-    for (int col_start = threadIdx.x; col_start < normalized_shape; col_start += BLOCK_SIZE * ILP) {
+    for (int col_start = threadIdx.x * N; col_start < normalized_shape; col_start += BLOCK_SIZE * ILP) {
 #pragma unroll
-        for (int i = 0; i < ILP; i++) {
+        for (int i = 0; i < ILP; i += N) {
             const int col = col_start + i * BLOCK_SIZE;
             if (col < normalized_shape) {
-                const float x = input_row[col];
-                const float grad_output_rrms = grad_output_row[col] * rrms;
-                grad_input_row[col] = grad_output_rrms * weight[col] - coef * x;
-                grad_weight_partial_row[col] = grad_output_rrms * x;
+                const floatN x = *(floatN *)&input_row[col];
+                const floatN grad_output_rrms = *(floatN *)&grad_output_row[col] * rrms;
+                *(floatN *)&grad_input_row[col] = grad_output_rrms * *(floatN *)&weight[col] - coef * x;
+                *(floatN *)&grad_weight_partial_row[col] = grad_output_rrms * x;
             }
         }
     }
@@ -185,29 +253,36 @@ std::vector<torch::Tensor> rms_norm_cuda_backward(torch::Tensor grad_output, tor
     const int normalized_shape = input.size(-1);
     const int blocks = input.numel() / normalized_shape;
 
-#define rms_norm_cuda_backward_kernel_launch(BLOCK_SIZE, ILP)                                                          \
-    rms_norm_cuda_backward_kernel<BLOCK_SIZE, ILP>                                                                     \
-        <<<blocks, BLOCK_SIZE>>>(grad_output.const_data_ptr<float>(), grad_input.mutable_data_ptr<float>(),            \
-                                 grad_weight_partial.mutable_data_ptr<float>(), input.const_data_ptr<float>(),         \
-                                 weight.const_data_ptr<float>(), normalized_shape, eps)
+#define rms_norm_cuda_backward_kernel_launch(BLOCK_SIZE, ILP, FLOAT_ALIGN)                                             \
+    rms_norm_cuda_backward_kernel<BLOCK_SIZE, ILP, FLOAT_ALIGN><<<blocks, BLOCK_SIZE, FLOAT_ALIGN>>>(                  \
+        grad_output.const_data_ptr<float>(), grad_input.mutable_data_ptr<float>(),                                     \
+        grad_weight_partial.mutable_data_ptr<float>(), input.const_data_ptr<float>(), weight.const_data_ptr<float>(),  \
+        normalized_shape, eps)
 
-    if (normalized_shape <= 32) {
-        rms_norm_cuda_backward_kernel_launch(32, 1);
-    } else if (normalized_shape <= 64) {
-        rms_norm_cuda_backward_kernel_launch(32, 2);
-    } else if (normalized_shape <= 128) {
-        rms_norm_cuda_backward_kernel_launch(32, 4);
-    } else if (normalized_shape <= 256) {
-        rms_norm_cuda_backward_kernel_launch(64, 4);
-    } else if (normalized_shape <= 512) {
-        rms_norm_cuda_backward_kernel_launch(128, 4);
-    } else if (normalized_shape <= 1024) {
-        rms_norm_cuda_backward_kernel_launch(256, 4);
-    } else if (normalized_shape <= 2048) {
-        rms_norm_cuda_backward_kernel_launch(512, 4);
-    } else {
-        rms_norm_cuda_backward_kernel_launch(1024, 4);
-    }
+    BOOL_SWITCH(normalized_shape % 4 == 0, FLOAT_ALIGN4, [&] {
+        BOOL_SWITCH(normalized_shape % 2 == 0, FLOAT_ALIGN2, [&] {
+            constexpr int FLOAT_ALIGN = FLOAT_ALIGN4 ? 4 : (FLOAT_ALIGN2 ? 2 : 1);
+            if (normalized_shape <= 32) {
+                rms_norm_cuda_backward_kernel_launch(32, 1, FLOAT_ALIGN);
+            } else if (normalized_shape <= 64) {
+                rms_norm_cuda_backward_kernel_launch(32, 2, FLOAT_ALIGN);
+            } else if (normalized_shape <= 128) {
+                rms_norm_cuda_backward_kernel_launch(32, 4, FLOAT_ALIGN);
+            } else if (normalized_shape <= 256) {
+                rms_norm_cuda_backward_kernel_launch(64, 4, FLOAT_ALIGN);
+            } else if (normalized_shape <= 512) {
+                rms_norm_cuda_backward_kernel_launch(128, 4, FLOAT_ALIGN);
+            } else if (normalized_shape <= 1024) {
+                rms_norm_cuda_backward_kernel_launch(256, 4, FLOAT_ALIGN);
+            } else if (normalized_shape <= 2048) {
+                rms_norm_cuda_backward_kernel_launch(512, 4, FLOAT_ALIGN);
+            } else if (normalized_shape <= 4096) {
+                rms_norm_cuda_backward_kernel_launch(1024, 4, FLOAT_ALIGN);
+            } else {
+                rms_norm_cuda_backward_kernel_launch(1024, 8, FLOAT_ALIGN);
+            }
+        });
+    });
 
 #undef rms_norm_cuda_backward_kernel_launch
 

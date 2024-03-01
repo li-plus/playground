@@ -40,7 +40,7 @@ def main():
     eps = 1e-6
 
     seq_len_choices = (128, 512, 2048)
-    hidden_size_choices = (32, 61, 64, 128, 131, 256, 512, 1024, 1027, 2048, 4096)
+    hidden_size_choices = (32, 61, 64, 128, 130, 256, 512, 1024, 1027, 2048, 4096, 8192, 16384)
 
     # seq_len_choices = (2048,)
     # hidden_size_choices = (4096,)
@@ -102,6 +102,7 @@ def main():
                 ts_stats.mean * 1e6,
                 triton_stats.mean * 1e6,
                 cuda_stats.mean * 1e6,
+                triton_stats.mean / cuda_stats.mean,
             ]
         )
 
@@ -123,6 +124,7 @@ def main():
                 ts_stats.mean * 1e6,
                 triton_stats.mean * 1e6,
                 cuda_stats.mean * 1e6,
+                triton_stats.mean / cuda_stats.mean,
             ]
         )
 
@@ -130,7 +132,7 @@ def main():
     print(
         tabulate(
             fwd_table,
-            headers=["shape", "rms_norm_naive", "rms_norm_ts", "rms_norm_triton", "rms_norm_cuda"],
+            headers=["shape", "rms_norm_naive", "rms_norm_ts", "rms_norm_triton", "rms_norm_cuda", "speedup vs triton"],
             tablefmt="psql",
             floatfmt=".3f",
         )
@@ -139,7 +141,7 @@ def main():
     print(
         tabulate(
             bwd_table,
-            headers=["shape", "rms_norm_naive", "rms_norm_ts", "rms_norm_triton", "rms_norm_cuda"],
+            headers=["shape", "rms_norm_naive", "rms_norm_ts", "rms_norm_triton", "rms_norm_cuda", "speedup vs triton"],
             tablefmt="psql",
             floatfmt=".3f",
         ),
