@@ -11,3 +11,13 @@ cmake-build-debug/
 
 # trace output
 # *.pt.trace.json.gz
+
+# python
+__pycache__/
+*.egg-info
+*.so
+compile_commands.json
+
+# profiler
+*.nsys-rep
+*.sqlite
