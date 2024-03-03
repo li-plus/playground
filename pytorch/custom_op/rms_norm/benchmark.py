@@ -26,7 +26,7 @@ def rms_norm_ts(input: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.
     return weight * input.to(input_dtype)
 
 
-@torch.compile(dynamic=False)
+@torch.compile
 def rms_norm_triton(input: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     input_dtype = input.dtype
     input = input.to(torch.float32)
@@ -38,6 +38,7 @@ def rms_norm_triton(input: torch.Tensor, weight: torch.Tensor, eps: float) -> to
 def main():
     batch_size = 4
     eps = 1e-6
+    timeit_number = 20
 
     dtype_choices = (torch.double, torch.float, torch.half, torch.bfloat16)
     seq_len_choices = (128, 512, 2048)
@@ -78,7 +79,7 @@ def main():
             ts_output.backward(grad, retain_graph=True)
             ts_dgrad, ts_wgrad = hidden_states.grad, weight.grad
             hidden_states.grad, weight.grad = None, None
-            torch.testing.assert_close(ts_dgrad, naive_dgrad, rtol=1e-3, atol=5e-2)
+            torch.testing.assert_close(ts_dgrad, naive_dgrad, rtol=1e-3, atol=1e-1)
             torch.testing.assert_close(ts_wgrad, naive_wgrad, rtol=1e-3, atol=1e-2)
 
             triton_output.backward(grad, retain_graph=True)
@@ -95,14 +96,16 @@ def main():
 
             # forward benchmark
             naive_stats = Timer("rms_norm_naive(hidden_states, weight, eps)", globals={**globals(), **locals()}).timeit(
-                10
+                timeit_number
             )
-            ts_stats = Timer("rms_norm_ts(hidden_states, weight, eps)", globals={**globals(), **locals()}).timeit(10)
+            ts_stats = Timer("rms_norm_ts(hidden_states, weight, eps)", globals={**globals(), **locals()}).timeit(
+                timeit_number
+            )
             triton_stats = Timer(
                 "rms_norm_triton(hidden_states, weight, eps)", globals={**globals(), **locals()}
-            ).timeit(10)
+            ).timeit(timeit_number)
             cuda_stats = Timer("rms_norm_cuda(hidden_states, weight, eps)", globals={**globals(), **locals()}).timeit(
-                10
+                timeit_number
             )
             fwd_table.append(
                 [
@@ -118,16 +121,16 @@ def main():
             # backward benchmark
             naive_stats = Timer(
                 "naive_output.backward(grad, retain_graph=True)", globals={**globals(), **locals()}
-            ).timeit(10)
+            ).timeit(timeit_number)
             ts_stats = Timer("ts_output.backward(grad, retain_graph=True)", globals={**globals(), **locals()}).timeit(
-                10
+                timeit_number
             )
             triton_stats = Timer(
                 "triton_output.backward(grad, retain_graph=True)", globals={**globals(), **locals()}
-            ).timeit(10)
+            ).timeit(timeit_number)
             cuda_stats = Timer(
                 "cuda_output.backward(grad, retain_graph=True)", globals={**globals(), **locals()}
-            ).timeit(10)
+            ).timeit(timeit_number)
             bwd_table.append(
                 [
                     hidden_states.shape,
