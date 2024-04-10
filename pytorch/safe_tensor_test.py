@@ -17,18 +17,26 @@ def st_load(path):
     return tensors
 
 
+def access(tensors):
+    return sum(x.sum() for x in tensors.values())
+
+
 tensors = {
-    "weight1": torch.zeros((1024, 1024, 256)),
-    "weight2": torch.zeros((1024, 1024, 256)),
+    "weight1": torch.randn((1024, 1024, 256)),
+    "weight2": torch.randn((1024, 1024, 256)),
 }
 
 with tempfile.TemporaryDirectory(prefix="/dev/shm/") as d:
-    save_path = Path(d) / "model_ckpt"
-
     # torch native
-    print(Timer("torch.save(tensors, save_path)", globals=globals()).timeit(3))
-    print(Timer("torch.load(save_path)", globals=globals()).timeit(3))
+    pt_path = Path(d) / "model.pt"
+    print(Timer("torch.save(tensors, pt_path)", globals=globals()).timeit(3))
+    print(Timer("torch.load(pt_path)", globals=globals()).timeit(3))
+    print(Timer("access(torch.load(pt_path))", globals=globals()).timeit(3))
 
     # safe tensors
-    print(Timer("save_file(tensors, save_path)", globals=globals()).timeit(3))
-    print(Timer("st_load(save_path)", globals=globals()).timeit(3))
+    st_path = Path(d) / "model.safetensors"
+    print(Timer("save_file(tensors, st_path)", globals=globals()).timeit(3))
+    print(Timer("st_load(st_path)", globals=globals()).timeit(3))
+    print(Timer("access(st_load(st_path))", globals=globals()).timeit(3))
+
+    torch.testing.assert_close(access(torch.load(pt_path)), access(st_load(st_path)))
