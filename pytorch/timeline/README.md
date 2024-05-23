@@ -78,12 +78,12 @@ bash training_scripts/opt/single_node/run_1.3b.sh ./output 3
 Initialization:
 * Each FP16 model param (2B/param) is partitioned across dp group (`_partition_param`) into `param.ds_tensor`. The original `param.data` is released (`free_param`).
 * Register module forward & backward hooks (`register_forward_hook`, `register_forward_pre_hook`). Make sure model params are allgathered before forward and partitioned after forward.
-* For optimizer, `_create_fp32_partitions` creates FP32 param partition (4B/param) and its gradient (4B/param). `initialize_optimizer_states` creates FP32 adam 1st and 2nd momentum vectors (8B/param)
+* For optimizer, `_create_fp32_partitions` creates FP32 param partition (4B/param). `initialize_optimizer_states` uses temporary dummy FP32 gradient (4B/param) to run optimizer step, creating FP32 adam 1st and 2nd momentum vectors (8B/param). `_setup_for_real_optimizer` creates FP32 gradient buffer (4B/param) for accumulation.
 * After initialization, exactly 18 bytes for each param are allocated and are evenly partitioned across dp group. During runtime, FP16 gradients (2B/param) are allocated for backward and freed after optimizer step.
 
 Forward:
 * Allgather module params and wait till status turns AVAILABLE (`fetch_sub_module`).
-* Prefetch next module params up to `stage3_max_live_parameters` numels. Their status become INFLIGHT. The async allgather handles are kept in param status.
+* Prefetch next module params up to `stage3_max_live_parameters` numels. Their status becomes INFLIGHT. The async allgather handles are kept in param status.
 * Run normal module forward function to transform activation.
 * Partition all params (`release_sub_module`) that will be reused beyond `stage3_max_reuse_distance`.
 
