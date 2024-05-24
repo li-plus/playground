@@ -57,9 +57,21 @@ def perf():
     )
 
     # speed test
-    print(Timer(stmt="logprobs_of_labels(logits[:, :-1], input_ids[:, 1:])", globals={**globals(), **locals()}).timeit(100))
-    print(Timer(stmt="logprobs_of_labels_v2(logits[:, :-1], input_ids[:, 1:])", globals={**globals(), **locals()}).timeit(100))
-    print(Timer(stmt="logprobs_of_labels_tt(logits[:, :-1], input_ids[:, 1:])", globals={**globals(), **locals()}).timeit(100))
+    print(
+        Timer(stmt="logprobs_of_labels(logits[:, :-1], input_ids[:, 1:])", globals={**globals(), **locals()}).timeit(
+            100
+        )
+    )
+    print(
+        Timer(stmt="logprobs_of_labels_v2(logits[:, :-1], input_ids[:, 1:])", globals={**globals(), **locals()}).timeit(
+            100
+        )
+    )
+    print(
+        Timer(stmt="logprobs_of_labels_tt(logits[:, :-1], input_ids[:, 1:])", globals={**globals(), **locals()}).timeit(
+            100
+        )
+    )
 
 
 perf()
