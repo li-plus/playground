@@ -148,3 +148,18 @@ Start training (TP=2 PP=2 DP=2)
 ```sh
 bash examples/pretrain_gpt_distributed_with_mp.sh
 ```
+
+Initialization:
+* Model: model weights are sharded across tensor & pipeline parallel group, and are replicated across data parallel group. Layers are evenly sharded across pipeline parallel group. Within each layer, attention weights are sharded by head and mlp weights are sharded by intermediate hidden dim across tensor parallel group. Rank allocation is: (inner) TP-DP-PP (outer).
+* Optimizer: optimizer states of each rank are sharded across its data parallel group if distributed optimizer is enabled.
+
+Forward / Backward: controled by scheduler
+
+Gradient Allreduce:
+* All gradients are reduce-scattered across data parallel group.
+* Layernorm gradients are allreduced across tensor parallel group.
+* Word embedding gradients of first and last pp rank are allreduced across embedding group, if wte weight is tied to lm head. Note that embedding is in a separate bucket.
+
+Optimizer:
+* Update local param partition with reduce-scattered local gradients.
+* Allgather updated model weights across data parallel group.

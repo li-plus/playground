@@ -17,3 +17,10 @@ x = torch.full((1,), fill_value=rank + 1, dtype=torch.float32, device="cuda")
 print(f"[{rank=}] before all_reduce: {x=}")
 dist.all_reduce(x)
 print(f"[{rank=}] after all_reduce: {x=}")
+
+# reduce scatter
+x = torch.full((8,), fill_value=rank + 1, dtype=torch.float32, device="cuda")
+y = x[rank : rank + 1]
+print(f"[{rank=}] before reduce_scatter: {x=}")
+dist.reduce_scatter_tensor(y, x)
+print(f"[{rank=}] after reduce_scatter: {x=}")
