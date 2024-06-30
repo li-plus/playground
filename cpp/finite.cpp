@@ -38,6 +38,16 @@ int main() {
               << "nan > 0       : " << (nan > 0) << "\n"
               << "\n";
 
+    std::cout << "max(nan, 0)   : " << std::max(nan, 0.f) << "\n"
+              << "max(0, nan)   : " << std::max(0.f, nan) << "\n"
+              << "max(nan, nan) : " << std::max(nan, nan) << "\n"
+              << "\n";
+
+    std::cout << "fmax(nan, 0)  : " << std::fmax(nan, 0.f) << "\n"
+              << "fmax(0, nan)  : " << std::fmax(0.f, nan) << "\n"
+              << "fmax(nan, nan): " << std::fmax(nan, nan) << "\n"
+              << "\n";
+
     std::cout << "inf == inf    : " << (inf == inf) << "\n"
               << "inf > 0       : " << (inf > 0) << "\n"
               << "inf < 0       : " << (inf < 0) << "\n"
