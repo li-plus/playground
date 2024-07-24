@@ -1,4 +1,6 @@
-TARGETS := finite init move
+TARGETS := finite init move optional
+
+CXXFLAGS := -std=c++17
 
 all: $(TARGETS)
 

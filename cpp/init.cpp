@@ -12,7 +12,7 @@ struct DefaultInit {
         Object(int val) { printf("Object init with value %d\n", val); }
     };
 
-    DefaultInit() {}
+    DefaultInit() = default;
 
     DefaultInit(int val) : obj(val) {}
 
