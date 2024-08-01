@@ -146,6 +146,32 @@ def flash_attn_tile(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor)
     return context
 
 
+def flash_attn_2(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+    _, head_dim = query.shape
+    scale = 1 / math.sqrt(head_dim)
+
+    context = torch.empty_like(query)
+
+    for i, q in enumerate(query):
+        s = torch.zeros(())
+        m = torch.tensor(float("-inf"))
+        o = torch.zeros_like(value[0])
+        for k, v in zip(key, value):
+            x = q.dot(k) * scale
+
+            m_old = m
+            m = torch.max(m, x)
+
+            s = s * (m_old - m).exp() + (x - m).exp()
+
+            # maintain the unscaled o, equal to o * s in flash 1
+            o = (m_old - m).exp() * o + (x - m).exp() * v
+
+        context[i] = o / s
+
+    return context
+
+
 def check_flash_attn():
     seq_len = 256
     head_dim = 32
@@ -155,10 +181,15 @@ def check_flash_attn():
     value = torch.randn(seq_len, head_dim)
 
     ref_context = F.scaled_dot_product_attention(query, key, value)
+
     flash_context = flash_attn(query, key, value)
-    flash_tile_context = flash_attn_tile(query, key, value)
     torch.testing.assert_close(ref_context, flash_context)
+
+    flash_tile_context = flash_attn_tile(query, key, value)
     torch.testing.assert_close(ref_context, flash_tile_context)
+
+    flash_2_context = flash_attn_2(query, key, value)
+    torch.testing.assert_close(ref_context, flash_2_context)
 
 
 check_online_softmax()
