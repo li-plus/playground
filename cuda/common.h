@@ -46,11 +46,11 @@ static inline float uniform(float lo, float hi) { return uniform() * (hi - lo) +
 
 template <typename Fn>
 static inline float timeit(Fn fn, int warmup, int active) {
-    float elapsed_ms;
     for (int i = 0; i < warmup; i++) {
         fn();
     }
 
+    float elapsed_ms;
     cudaEvent_t start, stop;
     CHECK_CUDA(cudaEventCreate(&start));
     CHECK_CUDA(cudaEventCreate(&stop));
@@ -64,7 +64,7 @@ static inline float timeit(Fn fn, int warmup, int active) {
     CHECK_CUDA(cudaEventDestroy(start));
     CHECK_CUDA(cudaEventDestroy(stop));
 
-    return elapsed_ms / active;
+    return elapsed_ms * 1e-3f / active;
 }
 
 static inline bool is_close(float a, float b, float atol = 1e-5f, float rtol = 1e-8f) {

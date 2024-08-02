@@ -1,0 +1,18 @@
+TARGETS := noop fuse
+
+CUDAFLAGS := -std=c++17 -gencode arch=compute_70,code=sm_70 -O3
+
+NVCC := nvcc
+
+all: $(TARGETS)
+
+%: %.cu
+	$(NVCC) $(CUDAFLAGS) $^ -o $@
+
+.PHONY: lint clean
+
+lint:
+	clang-format -i *.cu
+
+clean:
+	rm -rf $(TARGETS)
