@@ -40,7 +40,7 @@ static inline void check_cublas_status(cublasStatus_t status, const char *file, 
     }
 }
 
-static inline float uniform() { return (float)rand() / RAND_MAX; }
+static inline float uniform() { return rand() / (float) RAND_MAX; }
 
 static inline float uniform(float lo, float hi) { return uniform() * (hi - lo) + lo; }
 

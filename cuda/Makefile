@@ -1,4 +1,4 @@
-TARGETS := noop fuse
+TARGETS := noop fuse memcpy
 
 CUDAFLAGS := -std=c++17 -gencode arch=compute_70,code=sm_70 -O3
 

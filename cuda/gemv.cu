@@ -3,8 +3,6 @@
 // A is a [M, N] matrix, x is a [N] vector, and y is a [M] vector
 
 #include "common.h"
-#include <cublas_v2.h>
-#include <cuda_runtime.h>
 #include <functional>
 #include <string>
 
@@ -188,11 +186,11 @@ int main() {
     constexpr float total_mem = (M * N + M + N) * sizeof(float);
     for (const auto &kernel : benchmark_kernels) {
         auto fn = [=] { kernel.fn(dA, dx, out_dy, M, N); };
-        const float elapsed_ms = timeit(fn, 2, 10);
-        const float bw_actual = total_mem / 1e9 / (elapsed_ms / 1e3);
+        const float elapsed = timeit(fn, 2, 10);
+        const float bw_actual = total_mem / 1e9 / elapsed;
         const float bw_util = bw_actual / bw_peak;
-        printf("[%s] elapsed %.3f ms, bandwidth %.3f GB/s out of peak %.3f GB/s (%.3f%%)\n", kernel.name.c_str(),
-               elapsed_ms, bw_actual, bw_peak, bw_util * 100);
+        printf("[%s] elapsed %.3f s, bandwidth %.3f GB/s out of peak %.3f GB/s (%.3f%%)\n", kernel.name.c_str(),
+               elapsed, bw_actual, bw_peak, bw_util * 100);
     }
 
     CHECK_CUDA(cudaFree(dA));

@@ -27,10 +27,16 @@ void fused_mul_add_cuda(const float *input, const float *alpha, const float *bet
 }
 
 int main() {
-    const int n = 8192;
-    float h_input[n], h_alpha[n], h_beta[n], h_output_naive[n], h_output_fused[n];
+    const int n = 1024 * 256;
+
+    float *h_input = (float *)malloc(n * sizeof(float));
+    float *h_alpha = (float *)malloc(n * sizeof(float));
+    float *h_beta = (float *)malloc(n * sizeof(float));
+    float *h_output_naive = (float *)malloc(n * sizeof(float));
+    float *h_output_fused = (float *)malloc(n * sizeof(float));
 
     float *d_input, *d_alpha, *d_beta, *d_output_naive, *d_output_fused;
+
     CHECK_CUDA(cudaMalloc(&d_input, n * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_alpha, n * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_beta, n * sizeof(float)));
@@ -69,6 +75,18 @@ int main() {
 
     printf("naive: %.3f us\n", naive_elapsed * 1e6f);
     printf("fused: %.3f us\n", fused_elapsed * 1e6f);
+
+    CHECK_CUDA(cudaFree(d_input));
+    CHECK_CUDA(cudaFree(d_alpha));
+    CHECK_CUDA(cudaFree(d_beta));
+    CHECK_CUDA(cudaFree(d_output_naive));
+    CHECK_CUDA(cudaFree(d_output_fused));
+
+    free(h_input);
+    free(h_alpha);
+    free(h_beta);
+    free(h_output_naive);
+    free(h_output_fused);
 
     return 0;
 }

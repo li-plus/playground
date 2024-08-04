@@ -155,7 +155,7 @@ def flash_attn_2(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) ->
     for i, q in enumerate(query):
         s = torch.zeros(())
         m = torch.tensor(float("-inf"))
-        o = torch.zeros_like(value[0])
+        o_s = torch.zeros_like(value[0])
         for k, v in zip(key, value):
             x = q.dot(k) * scale
 
@@ -164,10 +164,10 @@ def flash_attn_2(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) ->
 
             s = s * (m_old - m).exp() + (x - m).exp()
 
-            # maintain the unscaled o, equal to o * s in flash 1
-            o = (m_old - m).exp() * o + (x - m).exp() * v
+            # maintain the unscaled o_s, equal to o * s in flash 1
+            o_s = (m_old - m).exp() * o_s + (x - m).exp() * v
 
-        context[i] = o / s
+        context[i] = o_s / s
 
     return context
 

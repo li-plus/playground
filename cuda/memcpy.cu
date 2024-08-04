@@ -1,33 +1,38 @@
 #include "common.h"
-#include <cuda_runtime.h>
-#include <string>
-#include <vector>
 
 int main() {
-    constexpr size_t N = 256 * MB;
+    constexpr size_t N = 1024ull * 1024 * 1024;
 
-    float *hA, *hB;
-    CHECK_CUDA(cudaHostAlloc(&hA, N * sizeof(float), cudaHostAllocDefault));
-    CHECK_CUDA(cudaHostAlloc(&hB, N * sizeof(float), cudaHostAllocDefault));
+    char *h_a, *h_b;
+    CHECK_CUDA(cudaHostAlloc(&h_a, N, cudaHostAllocDefault));
+    CHECK_CUDA(cudaHostAlloc(&h_b, N, cudaHostAllocDefault));
+    memset(h_a, 0x9c, N);
+    memset(h_b, 0xc9, N);
 
-    float *dA, *dB;
-    CHECK_CUDA(cudaMalloc(&dA, N * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&dB, N * sizeof(float)));
+    char *d_a, *d_b;
+    CHECK_CUDA(cudaMalloc(&d_a, N));
+    CHECK_CUDA(cudaMalloc(&d_b, N));
+    CHECK_CUDA(cudaMemset(d_a, 0x9c, N));
+    CHECK_CUDA(cudaMemset(d_b, 0xc9, N));
 
-    auto bench_fn = [=] {
-        cudaMemcpyAsync(dA, hA, N * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpyAsync(hB, dB, N * sizeof(float), cudaMemcpyDeviceToHost);
-    };
-    float elapsed_ms = timeit(bench_fn, 2, 10);
-    constexpr float PCIE_BW = 64; // uni-directional 64GB/s
-    float bw_actual = 2 * N * sizeof(float) / 1e9 / (elapsed_ms / 1e3);
-    float bw_util = bw_actual / PCIE_BW;
-    printf("pcie bandwidth %.2f / %.2f GB/s (%.2f%%)\n", bw_actual, PCIE_BW, bw_util * 100);
+    const float h2h_elapsed = timeit([=] { CHECK_CUDA(cudaMemcpyAsync(h_a, h_b, N, cudaMemcpyHostToHost)); }, 2, 10);
 
-    CHECK_CUDA(cudaFree(dA));
-    CHECK_CUDA(cudaFree(dB));
-    CHECK_CUDA(cudaFreeHost(hA));
-    CHECK_CUDA(cudaFreeHost(hB));
+    const float h2d_elapsed = timeit([=] { CHECK_CUDA(cudaMemcpyAsync(d_a, h_a, N, cudaMemcpyHostToDevice)); }, 2, 10);
+
+    const float d2d_elapsed =
+        timeit([=] { CHECK_CUDA(cudaMemcpyAsync(d_b, d_a, N, cudaMemcpyDeviceToDevice)); }, 2, 10);
+
+    const float d2h_elapsed = timeit([=] { CHECK_CUDA(cudaMemcpyAsync(h_b, d_b, N, cudaMemcpyDeviceToHost)); }, 2, 10);
+
+    printf("h2h: size %f GB, cost %.3f s, bandwidth %.3f GB/s\n", N / 1e9, h2h_elapsed, 2 * N / 1e9 / h2h_elapsed);
+    printf("h2d: size %f GB, cost %.3f s, bandwidth %.3f GB/s\n", N / 1e9, h2d_elapsed, 2 * N / 1e9 / h2d_elapsed);
+    printf("d2d: size %f GB, cost %.3f s, bandwidth %.3f GB/s\n", N / 1e9, d2d_elapsed, 2 * N / 1e9 / d2d_elapsed);
+    printf("d2h: size %f GB, cost %.3f s, bandwidth %.3f GB/s\n", N / 1e9, d2h_elapsed, 2 * N / 1e9 / d2h_elapsed);
+
+    CHECK_CUDA(cudaFree(d_a));
+    CHECK_CUDA(cudaFree(d_b));
+    CHECK_CUDA(cudaFreeHost(h_a));
+    CHECK_CUDA(cudaFreeHost(h_b));
 
     return 0;
 }
