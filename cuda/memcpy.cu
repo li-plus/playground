@@ -24,10 +24,10 @@ int main() {
 
     const float d2h_elapsed = timeit([=] { CHECK_CUDA(cudaMemcpyAsync(h_b, d_b, N, cudaMemcpyDeviceToHost)); }, 2, 10);
 
-    printf("h2h: size %f GB, cost %.3f s, bandwidth %.3f GB/s\n", N / 1e9, h2h_elapsed, 2 * N / 1e9 / h2h_elapsed);
-    printf("h2d: size %f GB, cost %.3f s, bandwidth %.3f GB/s\n", N / 1e9, h2d_elapsed, 2 * N / 1e9 / h2d_elapsed);
-    printf("d2d: size %f GB, cost %.3f s, bandwidth %.3f GB/s\n", N / 1e9, d2d_elapsed, 2 * N / 1e9 / d2d_elapsed);
-    printf("d2h: size %f GB, cost %.3f s, bandwidth %.3f GB/s\n", N / 1e9, d2h_elapsed, 2 * N / 1e9 / d2h_elapsed);
+    printf("h2h: size %.3f GB, cost %.3f s, bandwidth %.3f GB/s\n", N / 1e9, h2h_elapsed, 2 * N / 1e9 / h2h_elapsed);
+    printf("h2d: size %.3f GB, cost %.3f s, bandwidth %.3f GB/s\n", N / 1e9, h2d_elapsed, 2 * N / 1e9 / h2d_elapsed);
+    printf("d2d: size %.3f GB, cost %.3f s, bandwidth %.3f GB/s\n", N / 1e9, d2d_elapsed, 2 * N / 1e9 / d2d_elapsed);
+    printf("d2h: size %.3f GB, cost %.3f s, bandwidth %.3f GB/s\n", N / 1e9, d2h_elapsed, 2 * N / 1e9 / d2h_elapsed);
 
     CHECK_CUDA(cudaFree(d_a));
     CHECK_CUDA(cudaFree(d_b));

@@ -1,4 +1,4 @@
-TARGETS := noop fuse memcpy reduce_sum
+TARGETS := noop fuse memcpy reduce_sum add
 
 CUDAFLAGS := -std=c++17 -gencode arch=compute_70,code=sm_70 -O3
 

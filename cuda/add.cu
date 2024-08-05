@@ -1,109 +1,71 @@
 #include "common.h"
-#include <cuda_runtime.h>
-#include <string>
-#include <vector>
 
-__global__ void add_1_kernel(const float *__restrict__ A, const float *__restrict__ B, float *__restrict__ C, int N) {
-    int i = blockDim.x * blockIdx.x + threadIdx.x;
-    if (i >= N) {
-        return;
+__global__ void add_cuda_kernel(const float *__restrict__ input, const float *__restrict__ other,
+                                float *__restrict__ output, int N) {
+    const int i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (i < N) {
+        output[i] = input[i] + other[i];
     }
-    C[i] = A[i] + B[i];
 }
 
-__global__ void add_2_kernel(const float *__restrict__ A, const float *__restrict__ B, float *__restrict__ C, int N) {
-    int i = 4 * (blockDim.x * blockIdx.x + threadIdx.x);
-    if (i >= N) {
-        return;
-    }
-    float4 a4 = *(float4 *)&A[i];
-    float4 b4 = *(float4 *)&B[i];
-    float4 c4 = make_float4(a4.x + b4.x, a4.y + b4.y, a4.z + b4.z, a4.w + b4.w);
-    *(float4 *)&C[i] = c4;
-}
-
-static void add_1(const float *A, const float *B, float *C, int N) {
+static void add_cuda(const float *input, const float *other, float *output, int N) {
     constexpr int num_threads = 1024;
-    const int num_blocks = N / num_threads;
-    add_1_kernel<<<num_blocks, num_threads>>>(A, B, C, N);
+    const int num_blocks = (N + num_threads - 1) / num_threads;
+    add_cuda_kernel<<<num_blocks, num_threads>>>(input, other, output, N);
 }
 
-static void add_2(const float *A, const float *B, float *C, int N) {
-    constexpr int num_threads = 1024;
-    const int num_blocks = N / num_threads / 4;
-    add_2_kernel<<<num_blocks, num_threads>>>(A, B, C, N);
-}
-
-static void ref_add(const float *A, const float *B, float *C, int N) {
+static void add_cpu(const float *input, const float *other, float *output, int N) {
     for (int i = 0; i < N; i++) {
-        C[i] = A[i] + B[i];
+        output[i] = input[i] + other[i];
     }
 }
 
 int main() {
-    constexpr size_t N = 128 * MB;
+    constexpr size_t N = 128ull * 1024 * 1024;
 
-    float *hA, *hB, *hC;
-    CHECK_CUDA(cudaHostAlloc(&hA, N * sizeof(float), cudaHostAllocDefault));
-    CHECK_CUDA(cudaHostAlloc(&hB, N * sizeof(float), cudaHostAllocDefault));
-    CHECK_CUDA(cudaHostAlloc(&hC, N * sizeof(float), cudaHostAllocDefault));
+    float *h_input, *h_other, *h_output, *h_output_ref;
+    CHECK_CUDA(cudaHostAlloc(&h_input, N * sizeof(float), cudaHostAllocDefault));
+    CHECK_CUDA(cudaHostAlloc(&h_other, N * sizeof(float), cudaHostAllocDefault));
+    CHECK_CUDA(cudaHostAlloc(&h_output, N * sizeof(float), cudaHostAllocDefault));
+    CHECK_CUDA(cudaHostAlloc(&h_output_ref, N * sizeof(float), cudaHostAllocDefault));
 
+    float *d_input, *d_other, *d_output;
+    CHECK_CUDA(cudaMalloc(&d_input, N * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_other, N * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_output, N * sizeof(float)));
+
+    // set inputs
     for (int i = 0; i < N; i++) {
-        hA[i] = i;
-        hB[i] = 1;
+        h_input[i] = i;
+        h_other[i] = 1;
     }
 
-    float *hC_ref = (float *)malloc(N * sizeof(float));
+    CHECK_CUDA(cudaMemcpyAsync(d_input, h_input, N * sizeof(float), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpyAsync(d_other, h_other, N * sizeof(float), cudaMemcpyHostToDevice));
 
-    float *dA, *dB, *dC;
-    CHECK_CUDA(cudaMalloc(&dA, N * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&dB, N * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&dC, N * sizeof(float)));
+    // compute
+    add_cpu(h_input, h_other, h_output_ref, N);
+    add_cuda(d_input, d_other, d_output, N);
+    CHECK_CUDA(cudaMemcpy(h_output, d_output, N * sizeof(float), cudaMemcpyDeviceToHost));
 
-    CHECK_CUDA(cudaMemcpy(dA, hA, N * sizeof(float), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(dB, hB, N * sizeof(float), cudaMemcpyHostToDevice));
-
-    std::vector<std::pair<std::string, decltype(&add_1)>> kernels{
-        {"add_1", &add_1},
-        {"add_2", &add_2},
-    };
-
-    // launch cuda kernel
-    for (const auto &item : kernels) {
-        const std::string &name = item.first;
-        const auto fn = item.second;
-
-        fn(dA, dB, dC, N);
-        CHECK_CUDA(cudaDeviceSynchronize());
-        CHECK_CUDA(cudaMemcpy(hC, dC, N * sizeof(float), cudaMemcpyDeviceToHost));
-
-        ref_add(hA, hB, hC_ref, N);
-
-        // check results
-        for (int i = 0; i < N; i++) {
-            if (!is_close(hC[i], hC_ref[i])) {
-                printf("value diff: %f vs %f\n", hC[i], hC_ref[i]);
-            }
-        }
-
-        // perf
-        auto bench_fn = [=] { fn(dA, dB, dC, N); };
-        float elapsed_ms = timeit(bench_fn, 2, 10);
-        float bw_peak = V100SXM2Spec::PEAK_MEM_BW;
-        float bw_actual = 3 * N * sizeof(float) / 1e9 / (elapsed_ms / 1000);
-        float bw_util = bw_actual / bw_peak;
-        printf("[%s] elapsed %.3f ms, bandwidth %.3f GB/s / peak %.3f GB/s (%.3f%%)\n", name.c_str(), elapsed_ms,
-               bw_actual, bw_peak, bw_util * 100);
+    // check results
+    for (int i = 0; i < N; i++) {
+        CHECK(is_close(h_output[i], h_output_ref[i])) << h_output[i] << " vs " << h_output_ref[i];
     }
 
-    CHECK_CUDA(cudaFree(dA));
-    CHECK_CUDA(cudaFree(dB));
-    CHECK_CUDA(cudaFree(dC));
+    // benchmark
+    const float elapsed = timeit([=] { add_cuda(d_input, d_other, d_output, N); }, 2, 10);
+    const float bandwidth = 3 * N * sizeof(float) / 1e9 / elapsed;
+    printf("[add_cuda] elapsed %.3f us, bandwidth %.3f GB/s\n", elapsed * 1e6, bandwidth);
 
-    CHECK_CUDA(cudaFreeHost(hA));
-    CHECK_CUDA(cudaFreeHost(hB));
-    CHECK_CUDA(cudaFreeHost(hC));
-    free(hC_ref);
+    CHECK_CUDA(cudaFreeHost(h_input));
+    CHECK_CUDA(cudaFreeHost(h_other));
+    CHECK_CUDA(cudaFreeHost(h_output));
+    CHECK_CUDA(cudaFreeHost(h_output_ref));
+
+    CHECK_CUDA(cudaFree(d_input));
+    CHECK_CUDA(cudaFree(d_other));
+    CHECK_CUDA(cudaFree(d_output));
 
     return 0;
 }
