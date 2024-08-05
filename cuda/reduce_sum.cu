@@ -25,10 +25,12 @@ __device__ __forceinline__ float block_reduce_sum(float v) {
 }
 
 __global__ void sum_cuda_kernel(const float *input, float *output, float *reduce_buffer, int *semaphore, int N) {
-    float sum = 0.f;
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < N; i += gridDim.x * blockDim.x) {
-        sum += input[i];
+    float4 sum4 = make_float4(0.f, 0.f, 0.f, 0.f);
+    for (int i = 4 * (blockIdx.x * blockDim.x + threadIdx.x); i < N; i += 4 * gridDim.x * blockDim.x) {
+        float4 v = *(float4 *)&input[i];
+        sum4 = make_float4(sum4.x + v.x, sum4.y + v.y, sum4.z + v.z, sum4.w + v.w);
     }
+    float sum = (sum4.x + sum4.y) + (sum4.z + sum4.w);
     sum = block_reduce_sum(sum);
 
     __shared__ bool is_last_block_done_shared;
@@ -56,6 +58,7 @@ __global__ void sum_cuda_kernel(const float *input, float *output, float *reduce
 
 static void sum_cuda(const float *input, float *output, float *reduce_buffer, int *semaphore, int N, int num_blocks,
                      int num_threads) {
+    CHECK(N % 4 == 0);
     CHECK_CUDA(cudaMemsetAsync(semaphore, 0, sizeof(int)));
     sum_cuda_kernel<<<num_blocks, num_threads>>>(input, output, reduce_buffer, semaphore, N);
 }
@@ -71,7 +74,7 @@ static float sum_cpu(const float *input, int N) {
 int main() {
     constexpr size_t N = 128ull * 1024 * 1024;
     constexpr int num_threads = 1024;
-    constexpr int num_blocks = (N + num_threads - 1) / num_threads / 64;
+    constexpr int num_blocks = (N + num_threads - 1) / num_threads / 32;
 
     float *h_input;
     CHECK_CUDA(cudaHostAlloc(&h_input, N * sizeof(float), cudaHostAllocDefault));
