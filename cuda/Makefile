@@ -1,6 +1,6 @@
-TARGETS := noop fuse memcpy reduce_sum add
+TARGETS := noop fuse memcpy reduce_sum add gemv
 
-CUDAFLAGS := -std=c++17 -gencode arch=compute_70,code=sm_70 -O3
+CUDAFLAGS := -std=c++17 -gencode arch=compute_70,code=sm_70 -O3 -lcublas
 
 NVCC := nvcc
 

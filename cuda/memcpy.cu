@@ -19,14 +19,12 @@ int main() {
     char *h_a, *h_b;
     CHECK_CUDA(cudaHostAlloc(&h_a, N, cudaHostAllocDefault));
     CHECK_CUDA(cudaHostAlloc(&h_b, N, cudaHostAllocDefault));
-    memset(h_a, 0x9c, N);
-    memset(h_b, 0xc9, N);
 
     char *d_a, *d_b;
     CHECK_CUDA(cudaMalloc(&d_a, N));
     CHECK_CUDA(cudaMalloc(&d_b, N));
-    CHECK_CUDA(cudaMemset(d_a, 0x9c, N));
-    CHECK_CUDA(cudaMemset(d_b, 0xc9, N));
+
+    memset(h_b, 0x9c, N);
 
     const float h2h_elapsed = timeit([=] { CHECK_CUDA(cudaMemcpyAsync(h_a, h_b, N, cudaMemcpyHostToHost)); }, 2, 10);
 
@@ -35,9 +33,14 @@ int main() {
     const float d2d_elapsed =
         timeit([=] { CHECK_CUDA(cudaMemcpyAsync(d_b, d_a, N, cudaMemcpyDeviceToDevice)); }, 2, 10);
 
+    CHECK_CUDA(cudaMemset(d_b, 0x00, N));
     const float d2d_cuda_elapsed = timeit([=] { memcpy_cuda(d_b, d_a, N); }, 2, 10);
 
     const float d2h_elapsed = timeit([=] { CHECK_CUDA(cudaMemcpyAsync(h_b, d_b, N, cudaMemcpyDeviceToHost)); }, 2, 10);
+
+    for (int i = 0; i < N / sizeof(int); i++) {
+        CHECK(((int *)h_b)[i] == 0x9c9c9c9c);
+    }
 
     printf("h2h: size %.3f GB, cost %.3f s, bandwidth %.3f GB/s\n", N / 1e9, h2h_elapsed, 2 * N / 1e9 / h2h_elapsed);
     printf("h2d: size %.3f GB, cost %.3f s, bandwidth %.3f GB/s\n", N / 1e9, h2d_elapsed, 2 * N / 1e9 / h2d_elapsed);

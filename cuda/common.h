@@ -40,7 +40,7 @@ static inline void check_cublas_status(cublasStatus_t status, const char *file, 
     }
 }
 
-static inline float uniform() { return rand() / (float) RAND_MAX; }
+static inline float uniform() { return rand() / (float)RAND_MAX; }
 
 static inline float uniform(float lo, float hi) { return uniform() * (hi - lo) + lo; }
 
@@ -71,16 +71,10 @@ static inline bool is_close(float a, float b, float atol = 1e-5f, float rtol = 1
     return std::abs(a - b) < atol + rtol * std::abs(b);
 }
 
+static inline void check_is_close(const float *a, const float *b, int n, float atol = 1e-5f, float rtol = 1e-8f) {
+    for (int i = 0;i  < n; i++) {
+        CHECK(is_close(a[i], b[i])) << a[i] << " vs " << b[i];
+    }
+}
+
 static inline int ceil_div(int a, int b) { return (a + b - 1) / b; }
-
-static constexpr size_t KB = 1024;
-static constexpr size_t MB = 1024ull * KB;
-static constexpr size_t GB = 1024ull * MB;
-
-static constexpr int WARP_SIZE = 32;
-
-struct V100SXM2Spec {
-    static constexpr float PEAK_MEM_BW = 900; // GB/s
-    static constexpr float PEAK_FP32_TFLOPS = 15.7;
-    static constexpr float PEAK_FP16_TFLOPS = 125;
-};
