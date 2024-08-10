@@ -1,6 +1,6 @@
 #include "common.h"
 
-__global__ void memcpy_cuda_kernel(void *dst, const void *src, size_t count) {
+__global__ void memcpy_cuda_kernel(void *__restrict__ dst, const void *__restrict__ src, size_t count) {
     for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < count / sizeof(float4); i += gridDim.x * blockDim.x) {
         ((float4 *)dst)[i] = ((float4 *)src)[i];
     }

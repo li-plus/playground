@@ -72,9 +72,39 @@ static inline bool is_close(float a, float b, float atol = 1e-5f, float rtol = 1
 }
 
 static inline void check_is_close(const float *a, const float *b, int n, float atol = 1e-5f, float rtol = 1e-8f) {
-    for (int i = 0;i  < n; i++) {
-        CHECK(is_close(a[i], b[i])) << a[i] << " vs " << b[i];
+    for (int i = 0; i < n; i++) {
+        CHECK(is_close(a[i], b[i], atol, rtol)) << a[i] << " vs " << b[i];
+    }
+}
+
+static inline void check_is_close(const half *a, const half *b, int n, float atol = 1e-5f, float rtol = 1e-8f) {
+    for (int i = 0; i < n; i++) {
+        CHECK(is_close((float)a[i], (float)b[i], atol, rtol)) << (float)a[i] << " vs " << (float)b[i];
     }
 }
 
 static inline int ceil_div(int a, int b) { return (a + b - 1) / b; }
+
+__device__ __forceinline__ float warp_reduce_sum(float v) {
+#pragma unroll
+    for (int mask = 16; mask > 0; mask >>= 1) {
+        v += __shfl_xor_sync(0xffffffff, v, mask, warpSize);
+    }
+    return v;
+}
+
+__device__ __forceinline__ float block_reduce_sum(float v) {
+    v = warp_reduce_sum(v);
+    if (blockDim.x > warpSize) {
+        __shared__ float shm[32];
+        const int num_warps = blockDim.x / warpSize;
+        const int warp_id = threadIdx.x / warpSize;
+        const int lane_id = threadIdx.x % warpSize;
+        if (lane_id == 0) {
+            shm[warp_id] = v;
+        }
+        __syncthreads();
+        v = warp_reduce_sum((lane_id < num_warps) ? shm[lane_id] : 0.f);
+    }
+    return v;
+}

@@ -1,30 +1,7 @@
 #include "common.h"
 
-__device__ __forceinline__ float warp_reduce_sum(float v) {
-#pragma unroll
-    for (int mask = 16; mask > 0; mask >>= 1) {
-        v += __shfl_xor_sync(0xffffffff, v, mask, warpSize);
-    }
-    return v;
-}
-
-__device__ __forceinline__ float block_reduce_sum(float v) {
-    v = warp_reduce_sum(v);
-    if (blockDim.x > warpSize) {
-        __shared__ float shm[32];
-        const int num_warps = blockDim.x / warpSize;
-        const int warp_id = threadIdx.x / warpSize;
-        const int lane_id = threadIdx.x % warpSize;
-        if (lane_id == 0) {
-            shm[warp_id] = v;
-        }
-        __syncthreads();
-        v = warp_reduce_sum((lane_id < num_warps) ? shm[lane_id] : 0.f);
-    }
-    return v;
-}
-
-__global__ void sum_cuda_kernel(const float *input, float *output, float *reduce_buffer, int *semaphore, int N) {
+__global__ void sum_cuda_kernel(const float *__restrict__ input, float *__restrict__ output,
+                                float *__restrict__ reduce_buffer, int *__restrict__ semaphore, int N) {
     float4 sum4 = make_float4(0.f, 0.f, 0.f, 0.f);
     for (int i = 4 * (blockIdx.x * blockDim.x + threadIdx.x); i < N; i += 4 * gridDim.x * blockDim.x) {
         float4 v = *(float4 *)&input[i];

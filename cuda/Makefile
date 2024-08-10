@@ -1,4 +1,4 @@
-TARGETS := noop fuse memcpy reduce_sum add gemv
+TARGETS := noop fuse memcpy reduce_sum add sgemv hgemv sched
 
 CUDAFLAGS := -std=c++17 -gencode arch=compute_70,code=sm_70 -O3 -lcublas
 
@@ -12,7 +12,7 @@ all: $(TARGETS)
 .PHONY: lint clean
 
 lint:
-	clang-format -i *.cu
+	clang-format -i *.cu *.h
 
 clean:
 	rm -rf $(TARGETS)

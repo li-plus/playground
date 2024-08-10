@@ -1,12 +1,14 @@
 #include "common.h"
 
 // separate mul & add kernels
-__global__ void mul_cuda_kernel(const float *input, const float *other, float *output) {
+__global__ void mul_cuda_kernel(const float *__restrict__ input, const float *__restrict__ other,
+                                float *__restrict__ output) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     output[idx] = input[idx] * other[idx];
 }
 
-__global__ void add_cuda_kernel(const float *input, const float *other, float *output) {
+__global__ void add_cuda_kernel(const float *__restrict__ input, const float *__restrict__ other,
+                                float *__restrict__ output) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     output[idx] = input[idx] + other[idx];
 }
@@ -17,7 +19,8 @@ void naive_mul_add_cuda(const float *input, const float *alpha, const float *bet
 }
 
 // fused mul & add
-__global__ void fused_mul_add_cuda_kernel(const float *input, const float *alpha, const float *beta, float *output) {
+__global__ void fused_mul_add_cuda_kernel(const float *__restrict__ input, const float *__restrict__ alpha,
+                                          const float *__restrict__ beta, float *__restrict__ output) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     output[idx] = std::fma(input[idx], alpha[idx], beta[idx]);
 }
@@ -29,11 +32,13 @@ void fused_mul_add_cuda(const float *input, const float *alpha, const float *bet
 int main() {
     const int n = 1024 * 256;
 
-    float *h_input = (float *)malloc(n * sizeof(float));
-    float *h_alpha = (float *)malloc(n * sizeof(float));
-    float *h_beta = (float *)malloc(n * sizeof(float));
-    float *h_output_naive = (float *)malloc(n * sizeof(float));
-    float *h_output_fused = (float *)malloc(n * sizeof(float));
+    float *h_input, *h_alpha, *h_beta, *h_output_naive, *h_output_fused;
+
+    CHECK_CUDA(cudaMallocHost(&h_input, n * sizeof(float)));
+    CHECK_CUDA(cudaMallocHost(&h_alpha, n * sizeof(float)));
+    CHECK_CUDA(cudaMallocHost(&h_beta, n * sizeof(float)));
+    CHECK_CUDA(cudaMallocHost(&h_output_naive, n * sizeof(float)));
+    CHECK_CUDA(cudaMallocHost(&h_output_fused, n * sizeof(float)));
 
     float *d_input, *d_alpha, *d_beta, *d_output_naive, *d_output_fused;
 
@@ -82,11 +87,11 @@ int main() {
     CHECK_CUDA(cudaFree(d_output_naive));
     CHECK_CUDA(cudaFree(d_output_fused));
 
-    free(h_input);
-    free(h_alpha);
-    free(h_beta);
-    free(h_output_naive);
-    free(h_output_fused);
+    CHECK_CUDA(cudaFreeHost(h_input));
+    CHECK_CUDA(cudaFreeHost(h_alpha));
+    CHECK_CUDA(cudaFreeHost(h_beta));
+    CHECK_CUDA(cudaFreeHost(h_output_naive));
+    CHECK_CUDA(cudaFreeHost(h_output_fused));
 
     return 0;
 }

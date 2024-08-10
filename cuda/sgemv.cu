@@ -4,30 +4,6 @@
 
 #include "common.h"
 
-__device__ __forceinline__ float warp_reduce_sum(float v) {
-#pragma unroll
-    for (int mask = 16; mask > 0; mask >>= 1) {
-        v += __shfl_xor_sync(0xffffffff, v, mask, warpSize);
-    }
-    return v;
-}
-
-__device__ __forceinline__ float block_reduce_sum(float v) {
-    v = warp_reduce_sum(v);
-    if (blockDim.x > warpSize) {
-        __shared__ float shm[32];
-        const int num_warps = blockDim.x / warpSize;
-        const int warp_id = threadIdx.x / warpSize;
-        const int lane_id = threadIdx.x % warpSize;
-        if (lane_id == 0) {
-            shm[warp_id] = v;
-        }
-        __syncthreads();
-        v = warp_reduce_sum((lane_id < num_warps) ? shm[lane_id] : 0.f);
-    }
-    return v;
-}
-
 __global__ void sgemv_cuda_kernel(const float *__restrict__ A, const float *__restrict__ x, float *__restrict__ y,
                                   int M, int N) {
     float4 sum4 = make_float4(0.f, 0.f, 0.f, 0.f);
@@ -49,17 +25,15 @@ __global__ void sgemv_cuda_kernel(const float *__restrict__ A, const float *__re
     }
 }
 
-static inline void sgemv_cuda(const float *__restrict__ A, const float *__restrict__ x, float *__restrict__ y, int M,
-                              int N) {
+static inline void sgemv_cuda(const float *A, const float *x, float *y, int M, int N) {
     constexpr int num_threads = 1024;
     const int num_blocks = M;
     sgemv_cuda_kernel<<<num_blocks, num_threads>>>(A, x, y, M, N);
 }
 
-static inline void sgemv_cublas(cublasHandle_t handle, const float *__restrict__ A, const float *__restrict__ x,
-                                float *__restrict__ y, int M, int N) {
-    float alpha = 1;
-    float beta = 0;
+static inline void sgemv_cublas(cublasHandle_t handle, const float *A, const float *x, float *y, int M, int N) {
+    const float alpha = 1;
+    const float beta = 0;
     CHECK_CUBLAS(cublasSgemv(handle, CUBLAS_OP_T, N, M, &alpha, A, N, x, 1, &beta, y, 1));
 }
 
@@ -84,11 +58,11 @@ int main() {
 
     for (int i = 0; i < M; i++) {
         for (int j = 0; j < N; j++) {
-            h_A[i] = uniform();
+            h_A[i] = uniform(-1, 1);
         }
     }
     for (int i = 0; i < N; i++) {
-        h_x[i] = uniform();
+        h_x[i] = uniform(-1, 1);
     }
     CHECK_CUDA(cudaMemcpyAsync(d_A, h_A, M * N * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpyAsync(d_x, h_x, N * sizeof(float), cudaMemcpyHostToDevice));
@@ -109,8 +83,9 @@ int main() {
     const float elapsed_cuda = timeit([=] { sgemv_cuda(d_A, d_x, d_y, M, N); }, 2, 10);
     const float elapsed_cublas = timeit([=] { sgemv_cublas(cublas_handle, d_A, d_x, d_y_ref, M, N); }, 2, 10);
 
-    printf("[cuda]   elapsed %.3f us, bandwidth %.3f GB/s\n", elapsed_cuda * 1e6f, nbytes / 1e9f / elapsed_cuda);
-    printf("[cublas] elapsed %.3f us, bandwidth %.3f GB/s\n", elapsed_cublas * 1e6f, nbytes / 1e9f / elapsed_cublas);
+    printf("[sgemv-cuda]   elapsed %.3f us, bandwidth %.3f GB/s\n", elapsed_cuda * 1e6f, nbytes / 1e9f / elapsed_cuda);
+    printf("[sgemv-cublas] elapsed %.3f us, bandwidth %.3f GB/s\n", elapsed_cublas * 1e6f,
+           nbytes / 1e9f / elapsed_cublas);
 
     CHECK_CUBLAS(cublasDestroy(cublas_handle));
 
