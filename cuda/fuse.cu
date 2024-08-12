@@ -64,8 +64,6 @@ int main() {
     naive_mul_add_cuda(d_input, d_alpha, d_beta, d_output_naive, n);
     CHECK_CUDA(cudaMemcpy(h_output_naive, d_output_naive, n * sizeof(float), cudaMemcpyDeviceToHost));
 
-    CHECK_CUDA(cudaDeviceSynchronize());
-
     // check correctness
     for (int i = 0; i < n; i++) {
         CHECK(is_close(h_output_fused[i], h_output_naive[i]))
