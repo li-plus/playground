@@ -2,9 +2,11 @@
 
 #include <cassert>
 #include <chrono>
+#include <cinttypes>
 #include <immintrin.h>
 #include <iostream>
 #include <vector>
+#include <x86intrin.h>
 
 void avx256_add(const float *a, const float *b, float *output, int n) {
     int i;
@@ -44,6 +46,14 @@ float timeit(Fn fn, int n) {
     return elapsed / n;
 }
 
+template <typename Fn>
+uint64_t count_cpu_cycles(Fn fn) {
+    const auto cycle_start = __rdtsc();
+    fn();
+    const auto cycle_end = __rdtsc();
+    return cycle_end - cycle_start;
+}
+
 int main() {
     const int n = 1025;
     std::vector<float> a(n), b(n), output_avx256(n), output_scalar(n);
@@ -59,11 +69,14 @@ int main() {
         assert(std::abs(output_avx256[i] - output_scalar[i]) < 1e-3f);
     }
 
+    const auto cycles_avx256 = count_cpu_cycles([&] { avx256_add(a.data(), b.data(), output_avx256.data(), n); });
+    const auto cycles_scalar = count_cpu_cycles([&] { scalar_add(a.data(), b.data(), output_avx256.data(), n); });
+
     const float elapsed_avx256 = timeit([&] { avx256_add(a.data(), b.data(), output_avx256.data(), n); }, 100);
     const float elapsed_scalar = timeit([&] { scalar_add(a.data(), b.data(), output_scalar.data(), n); }, 100);
 
-    printf("[scalar] elapsed %.3f ns\n", elapsed_scalar * 1e9);
-    printf("[avx256] elapsed %.3f ns\n", elapsed_avx256 * 1e9);
+    printf("[scalar] cpu cycles: %lu, elapsed %.3f ns\n", cycles_scalar, elapsed_scalar * 1e9f);
+    printf("[avx256] cpu cycles: %lu, elapsed %.3f ns\n", cycles_avx256, elapsed_avx256 * 1e9f);
 
     return 0;
 }
