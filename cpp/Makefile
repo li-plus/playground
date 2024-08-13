@@ -1,6 +1,6 @@
-TARGETS := finite init move optional
+TARGETS := finite init move optional avx
 
-CXXFLAGS := -std=c++17
+CXXFLAGS := -std=c++17 -mavx -O2
 
 all: $(TARGETS)
 
