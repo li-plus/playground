@@ -46,6 +46,7 @@ float timeit(Fn fn, int n) {
     return elapsed / n;
 }
 
+// https://stackoverflow.com/questions/13772567/how-to-get-the-cpu-cycle-count-in-x86-64-from-c
 template <typename Fn>
 uint64_t count_cpu_cycles(Fn fn) {
     const auto cycle_start = __rdtsc();

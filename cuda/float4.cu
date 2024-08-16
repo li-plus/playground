@@ -63,8 +63,8 @@ int main() {
     const float elapsed_f4 = timeit([=] { add_f4_cuda(d_input, d_other, d_output_f4, N); }, 2, 10);
     const float bandwidth_f1 = 3 * N * sizeof(float) / 1e9 / elapsed_f1;
     const float bandwidth_f4 = 3 * N * sizeof(float) / 1e9 / elapsed_f4;
-    printf("[add_cuda] elapsed %.3f us, bandwidth %.3f GB/s\n", elapsed_f1 * 1e6, bandwidth_f1);
-    printf("[add_cuda] elapsed %.3f us, bandwidth %.3f GB/s\n", elapsed_f4 * 1e6, bandwidth_f4);
+    printf("[float1] elapsed %.3f us, bandwidth %.3f GB/s\n", elapsed_f1 * 1e6, bandwidth_f1);
+    printf("[float4] elapsed %.3f us, bandwidth %.3f GB/s\n", elapsed_f4 * 1e6, bandwidth_f4);
 
     CHECK_CUDA(cudaFreeHost(h_input));
     CHECK_CUDA(cudaFreeHost(h_other));
