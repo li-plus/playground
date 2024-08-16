@@ -1,4 +1,4 @@
-TARGETS := finite init move optional avx
+TARGETS := finite init move optional avx float
 
 CXXFLAGS := -std=c++17 -mavx -O2
 
