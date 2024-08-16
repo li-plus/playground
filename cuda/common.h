@@ -71,14 +71,14 @@ static inline bool is_close(float a, float b, float atol = 1e-5f, float rtol = 1
     return std::abs(a - b) < atol + rtol * std::abs(b);
 }
 
-static inline void check_is_close(const float *a, const float *b, int n, float atol = 1e-5f, float rtol = 1e-8f) {
-    for (int i = 0; i < n; i++) {
+static inline void check_is_close(const float *a, const float *b, size_t n, float atol = 1e-5f, float rtol = 1e-8f) {
+    for (size_t i = 0; i < n; i++) {
         CHECK(is_close(a[i], b[i], atol, rtol)) << a[i] << " vs " << b[i];
     }
 }
 
-static inline void check_is_close(const half *a, const half *b, int n, float atol = 1e-5f, float rtol = 1e-8f) {
-    for (int i = 0; i < n; i++) {
+static inline void check_is_close(const half *a, const half *b, size_t n, float atol = 1e-5f, float rtol = 1e-8f) {
+    for (size_t i = 0; i < n; i++) {
         CHECK(is_close((float)a[i], (float)b[i], atol, rtol)) << (float)a[i] << " vs " << (float)b[i];
     }
 }

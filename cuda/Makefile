@@ -1,13 +1,15 @@
-TARGETS := noop fuse memcpy reduce_sum float4 sgemv hgemv sched coalesce
+TARGETS := noop fuse memcpy reduce_sum float4 sgemv hgemv sched coalesce transpose
 
-CUDAFLAGS := -std=c++17 -gencode arch=compute_70,code=sm_70 -O3 -lcublas
+CUDAFLAGS := -std=c++17 -gencode arch=compute_70,code=sm_70 -O3 -lineinfo
+
+LIBRARIES := -lcublas
 
 NVCC := nvcc
 
 all: $(TARGETS)
 
 %: %.cu
-	$(NVCC) $(CUDAFLAGS) $^ -o $@
+	$(NVCC) $(CUDAFLAGS) $(LIBRARIES) $^ -o $@
 
 .PHONY: lint clean
 

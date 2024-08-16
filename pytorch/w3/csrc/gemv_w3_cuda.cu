@@ -404,20 +404,20 @@ __global__ void gemv_i3_v2_kernel(const scalar_t *__restrict__ input, const uint
         ((float4*)x)[2] = ((float4*)input)[i / 128 + 14 * block_size];
         ((float4*)x)[3] = ((float4*)input)[i / 128 + 15 * block_size];
 
-        // uint32_t w4_x = (w0[0] >> 3) | (w1[0] >> 2) | (w2[0] >> 1);
-        uint32_t w4_x = (w0[0] >> 3);
+        uint32_t w4_x = (w0[0] >> 3) | (w1[0] >> 2) | (w2[0] >> 1);
+        // uint32_t w4_x = (w0[0] >> 3);
         ((FragB*)fb)[0] = dequant(w4_x);
         ((FragB*)fb)[1] = dequant(w4_x >> 4);
-        // uint32_t w4_y = (w0[1] >> 3) | (w1[1] >> 2) | (w2[1] >> 1);
-        uint32_t w4_y = (w0[1] >> 3) ;
+        uint32_t w4_y = (w0[1] >> 3) | (w1[1] >> 2) | (w2[1] >> 1);
+        // uint32_t w4_y = (w0[1] >> 3) ;
         ((FragB*)fb)[2] = dequant(w4_y);
         ((FragB*)fb)[3] = dequant(w4_y >> 4);
-        // uint32_t w4_z = (w0[2] >> 3) | (w1[2] >> 2) | (w2[2] >> 1);
-        uint32_t w4_z = (w0[2] >> 3) ;
+        uint32_t w4_z = (w0[2] >> 3) | (w1[2] >> 2) | (w2[2] >> 1);
+        // uint32_t w4_z = (w0[2] >> 3) ;
         ((FragB*)fb)[4] = dequant(w4_z);
         ((FragB*)fb)[5] = dequant(w4_z >> 4);
-        // uint32_t w4_w = (w0[3] >> 3) | (w1[3] >> 2) | (w2[3] >> 1);
-        uint32_t w4_w = (w0[3] >> 3) ;
+        uint32_t w4_w = (w0[3] >> 3) | (w1[3] >> 2) | (w2[3] >> 1);
+        // uint32_t w4_w = (w0[3] >> 3) ;
         ((FragB*)fb)[6] = dequant(w4_w);
         ((FragB*)fb)[7] = dequant(w4_w >> 4);
 

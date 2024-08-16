@@ -47,3 +47,25 @@ Best results on A100:
 # GPU Arch
 
 A100 GPU white paper: https://images.nvidia.com/aem-dam/en-zz/Solutions/data-center/nvidia-ampere-architecture-whitepaper.pdf
+
+# Nsight System
+
+WIP
+
+# Nsight Compute
+
+Download from https://developer.nvidia.com/tools-overview/nsight-compute/get-started.
+
+Install Nsight Compute GUI on host. Should be an interactive installation guide.
+
+Install Nsight Compute CLI on server:
+```sh
+bash nsight-compute-linux-2024.3.0.15-34567288.run
+```
+
+Profile kernel `memcpy_cuda_kernel` on server. Collect results of 4 kernels after skipping 2 kernels.
+```sh
+sudo -E ncu -o profile -f -k memcpy_cuda_kernel -s 2 -c 4 memcpy
+```
+
+See https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html for usage details.

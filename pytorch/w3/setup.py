@@ -7,7 +7,7 @@ setup(
     description="Example of PyTorch cpp and CUDA extensions",
     ext_modules=[
         CUDAExtension(
-            name="chat1s_op",
+            name="gemv_w3",
             sources=["csrc/gemv_w3_cuda.cu", "csrc/gemv_w3.cpp"],
             extra_compile_args={"cxx": ["-g", "-O3"], "nvcc": ["-O3",
                         "-U__CUDA_NO_HALF_OPERATORS__",
