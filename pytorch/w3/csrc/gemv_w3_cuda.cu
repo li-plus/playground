@@ -1,7 +1,8 @@
+#include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
-#include <cstdio>
 
 template <int warp_size = 32>
 __device__ __forceinline__ float warp_reduce_sum(float v) {
@@ -55,7 +56,8 @@ __device__ __forceinline__ float block_reduce_sum_0(float v) {
 //     // static_assert(sizeof(scalar_t) == 2);
 
 //     // constexpr float quant_map[16]  {-1.0, -0.6961928009986877, -0.5250730514526367, -0.39491748809814453,
-//     // -0.28444138169288635, -0.18477343022823334, -0.09105003625154495, 0.0, 0.07958029955625534, 0.16093020141124725,
+//     // -0.28444138169288635, -0.18477343022823334, -0.09105003625154495, 0.0, 0.07958029955625534,
+//     0.16093020141124725,
 //     // 0.24611230194568634, 0.33791524171829224, 0.44070982933044434, 0.5626170039176941, 0.7229568362236023, 1.0};
 
 //     __shared__ scalar_t scales_row[64]; // size: N / group_size
@@ -131,7 +133,8 @@ __device__ __forceinline__ float block_reduce_sum_0(float v) {
 // // template void gemv_nf4_cuda<float, 64>(const float *input, const uint8_t *weight, const float *scales, const float
 // // *bias, float *output, int M, int N);
 
-// template void gemv_nf4_cuda<half, 64>(const half *input, const uint8_t *weight, const float *scales, const half *bias,
+// template void gemv_nf4_cuda<half, 64>(const half *input, const uint8_t *weight, const float *scales, const half
+// *bias,
 //                                       half *output, int M, int N);
 
 // template void gemv_nf4_cuda<nv_bfloat16, 64>(const nv_bfloat16 *input, const uint8_t *weight, const float *scales,
@@ -147,13 +150,13 @@ template <typename scalar_t, int group_size, int block_size>
 __global__ void gemv_i3_kernel(const scalar_t *__restrict__ input, const uint8_t *__restrict__ weight,
                                const scalar_t *__restrict__ scales, const scalar_t *__restrict__ bias,
                                scalar_t *__restrict__ output, int M, int N) {
-                                // TODO: pass as args
-    const uint8_t *weight_lo = weight + blockIdx.x * (N / 4);  // 2-bit low
+    // TODO: pass as args
+    const uint8_t *weight_lo = weight + blockIdx.x * (N / 4);             // 2-bit low
     const uint8_t *weight_hi = weight + M * N / 4 + blockIdx.x * (N / 8); // 1-bit high
 
     __shared__ scalar_t s_scales_row[32]; // size: N / group_size = 4096 / 128
-    __shared__ uint8_t s_weight_lo[1024];   // size: N / 4 = 1024
-    __shared__ uint8_t s_weight_hi[512];    // size: N / 8 = 512
+    __shared__ uint8_t s_weight_lo[1024]; // size: N / 4 = 1024
+    __shared__ uint8_t s_weight_hi[512];  // size: N / 8 = 512
     // const uint8_t *weight_row = weight + blockDim.x * (N / 2);
 
     const scalar_t *scales_row = scales + blockIdx.x * (N / group_size);
@@ -161,11 +164,11 @@ __global__ void gemv_i3_kernel(const scalar_t *__restrict__ input, const uint8_t
         // N / group_size
         for (int i = threadIdx.x; i < N / group_size; i += blockDim.x) {
             s_scales_row[i] = scales_row[i];
-        } 
+        }
     } else if (threadIdx.x < 32 + 64) {
-        *(float4*)&s_weight_lo[(threadIdx.x - 32) * 16] = *(float4*)&weight_lo[(threadIdx.x - 32) * 16];
+        *(float4 *)&s_weight_lo[(threadIdx.x - 32) * 16] = *(float4 *)&weight_lo[(threadIdx.x - 32) * 16];
     } else if (threadIdx.x < 32 + 64 + 32) {
-        *(float4*)&s_weight_hi[(threadIdx.x - (32+64)) * 16] = *(float4*)&weight_hi[(threadIdx.x - (32+64)) * 16];
+        *(float4 *)&s_weight_hi[(threadIdx.x - (32 + 64)) * 16] = *(float4 *)&weight_hi[(threadIdx.x - (32 + 64)) * 16];
     }
     __syncthreads();
 
@@ -179,14 +182,14 @@ __global__ void gemv_i3_kernel(const scalar_t *__restrict__ input, const uint8_t
         *(float4 *)x_h = *(float4 *)&input[i];
 
         uint8_t w_lo_i[2];
-        *(uint16_t *)w_lo_i = *(uint16_t*)&s_weight_lo[i / 4];    // TODO: optimize
-        uint8_t w_hi_i = *(uint8_t*)&s_weight_hi[i / 8];      // TODO: optimize
+        *(uint16_t *)w_lo_i = *(uint16_t *)&s_weight_lo[i / 4]; // TODO: optimize
+        uint8_t w_hi_i = *(uint8_t *)&s_weight_hi[i / 8];       // TODO: optimize
 
         scalar_t w_h[8];
 
-        // uint32_t w_i4_lo = (w_lo_i[0] | (w_lo_i[0] << (8-2)) | (w_lo_i[0] << (16-4)) | (w_lo_i[0] << (24-6))) & 0x03030303;
-        // uint32_t w_i4_hi = ((w_hi_i << 2) | (w_hi_i << (8 + 1)) | (w_hi_i << 16) | (w_hi_i << (24 - 1))) & 0x04040404;
-        // uint32_t w_i4 = __vsub4(w_i4_lo, w_i4_hi);
+        // uint32_t w_i4_lo = (w_lo_i[0] | (w_lo_i[0] << (8-2)) | (w_lo_i[0] << (16-4)) | (w_lo_i[0] << (24-6))) &
+        // 0x03030303; uint32_t w_i4_hi = ((w_hi_i << 2) | (w_hi_i << (8 + 1)) | (w_hi_i << 16) | (w_hi_i << (24 - 1)))
+        // & 0x04040404; uint32_t w_i4 = __vsub4(w_i4_lo, w_i4_hi);
 
         // w_h[0] = scalar_t(int8_t(w_i4 & 0xff));
         // w_h[1] = scalar_t(int8_t((w_i4 >> 8) & 0xff));
@@ -201,11 +204,9 @@ __global__ void gemv_i3_kernel(const scalar_t *__restrict__ input, const uint8_t
         // w_h[6] = scalar_t(int8_t((w_i4 >> 16) & 0xff));
         // w_h[7] = scalar_t(int8_t((w_i4 >> 24) & 0xff));
 
-
-
         w_h[0] = fast_int16_to_half(int8_t(uint32_t(w_lo_i[0]) & 0x3) - ((w_hi_i << 2) & 0x4));
         w_h[1] = fast_int16_to_half(int8_t((w_lo_i[0] >> 2) & 0x3) - ((w_hi_i << 1) & 0x4));
-        w_h[2] = fast_int16_to_half(int8_t((w_lo_i[0] >> 4) & 0x3) - (w_hi_i  & 0x4));
+        w_h[2] = fast_int16_to_half(int8_t((w_lo_i[0] >> 4) & 0x3) - (w_hi_i & 0x4));
         w_h[3] = fast_int16_to_half(int8_t(w_lo_i[0] >> 6) - ((w_hi_i >> 1) & 0x4));
         w_h[4] = fast_int16_to_half(int8_t(w_lo_i[1] & 0x3) - ((w_hi_i >> 2) & 0x4));
         w_h[5] = fast_int16_to_half(int8_t((w_lo_i[1] >> 2) & 0x3) - ((w_hi_i >> 3) & 0x4));
@@ -213,15 +214,17 @@ __global__ void gemv_i3_kernel(const scalar_t *__restrict__ input, const uint8_t
         w_h[7] = fast_int16_to_half(int8_t(w_lo_i[1] >> 6) - ((w_hi_i >> 5) & 0x4));
 
         // if (threadIdx.x + blockIdx.x + i == 0) {
-        //     printf("first qweight: %f %f %f %f %f %f %f %f\n", (float) w_h[0], (float) w_h[1], (float) w_h[2], (float) w_h[3], (float) w_h[4], (float) w_h[5], (float) w_h[6],  (float) w_h[7]);
-        //     printf("first weight: %f %f %f %f %f %f %f %f\n", float(s)*(float) w_h[0], float(s)*(float) w_h[1], float(s)*(float) w_h[2], float(s)*(float) w_h[3], float(s)*(float) w_h[4], float(s)*(float) w_h[5], float(s)*(float) w_h[6], float(s)* (float) w_h[7]);
-        //     printf("first scale: %f\n", float(s));
+        //     printf("first qweight: %f %f %f %f %f %f %f %f\n", (float) w_h[0], (float) w_h[1], (float) w_h[2],
+        //     (float) w_h[3], (float) w_h[4], (float) w_h[5], (float) w_h[6],  (float) w_h[7]); printf("first weight:
+        //     %f %f %f %f %f %f %f %f\n", float(s)*(float) w_h[0], float(s)*(float) w_h[1], float(s)*(float) w_h[2],
+        //     float(s)*(float) w_h[3], float(s)*(float) w_h[4], float(s)*(float) w_h[5], float(s)*(float) w_h[6],
+        //     float(s)* (float) w_h[7]); printf("first scale: %f\n", float(s));
         // }
 
         float partial_sum = 0.f;
-        #pragma unroll
+#pragma unroll
         for (int j = 0; j < 4; j++) {
-            const float2 x_w_f2 = __half22float2(__hmul2(((half2*)x_h)[j], ((half2*)w_h)[j]));
+            const float2 x_w_f2 = __half22float2(__hmul2(((half2 *)x_h)[j], ((half2 *)w_h)[j]));
             partial_sum += x_w_f2.x + x_w_f2.y;
         }
 
@@ -236,32 +239,26 @@ __global__ void gemv_i3_kernel(const scalar_t *__restrict__ input, const uint8_t
 }
 
 // Lookup-table based 3-input logical operation; explicitly used for dequantization as the compiler does not seem to
-// automatically recognize it in all cases. 
+// automatically recognize it in all cases.
 template <int lut>
 __device__ inline int lop3(int a, int b, int c) {
-  int res;
-  asm volatile(
-    "lop3.b32 %0, %1, %2, %3, %4;\n"
-    : "=r"(res) : "r"(a), "r"(b), "r"(c), "n"(lut)
-  );
-  return res;
+    int res;
+    asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n" : "=r"(res) : "r"(a), "r"(b), "r"(c), "n"(lut));
+    return res;
 }
-
 
 // Instances of `Vec` are used to organize groups of >>registers<<, as needed for instance as inputs to tensor core
 // operations. Consequently, all corresponding index accesses must be compile-time constants, which is why we
 // extensively use `#pragma unroll` throughout the kernel code to guarantee this.
 template <typename T, int n>
 struct Vec {
-  T elems[n];
-  __device__ T& operator[](int i) {
-    return elems[i];
-  }
+    T elems[n];
+    __device__ T &operator[](int i) { return elems[i]; }
 };
 
 using I4 = Vec<int, 4>;
 
-// Matrix fragments for tensor core instructions; their precise layout is documented here: 
+// Matrix fragments for tensor core instructions; their precise layout is documented here:
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#matrix-fragments-for-mma-m16n8k16-with-floating-point-type
 using FragA = Vec<half2, 4>;
 using FragB = Vec<half2, 2>;
@@ -272,166 +269,267 @@ using FragS = Vec<half2, 1>; // quantization scales
 // We mostly follow the strategy in the link below, with some small changes:
 // https://github.com/NVIDIA/FasterTransformer/blob/main/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h
 __device__ inline FragB dequant(int q) {
-  const int LO = 0x000f000f;
-  const int HI = 0x00f000f0;
-  const int EX = 0x64006400;
-  // Guarantee that the `(a & b) | c` operations are LOP3s.
-  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
-  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
-  // We want signed int4 outputs, hence we fuse the `-8` symmetric zero point directly into `SUB` and `ADD`.
-  const int SUB = 0x64086408;
-  const int MUL = 0x2c002c00;
-  const int ADD = 0xd480d480;
-  FragB frag_b;
-  frag_b[0] = __hsub2(
-    *reinterpret_cast<half2*>(&lo),
-    *reinterpret_cast<const half2*>(&SUB)
-  );
-  frag_b[1] = __hfma2(
-    *reinterpret_cast<half2*>(&hi),
-    *reinterpret_cast<const half2*>(&MUL), *reinterpret_cast<const half2*>(&ADD)
-  );
-  return frag_b;
+    const int LO = 0x000f000f;
+    const int HI = 0x00f000f0;
+    const int EX = 0x64006400;
+    // Guarantee that the `(a & b) | c` operations are LOP3s.
+    int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+    int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
+    // We want signed int4 outputs, hence we fuse the `-8` symmetric zero point directly into `SUB` and `ADD`.
+    const int SUB = 0x64086408;
+    const int MUL = 0x2c002c00;
+    const int ADD = 0xd480d480;
+    FragB frag_b;
+    frag_b[0] = __hsub2(*reinterpret_cast<half2 *>(&lo), *reinterpret_cast<const half2 *>(&SUB));
+    frag_b[1] = __hfma2(*reinterpret_cast<half2 *>(&hi), *reinterpret_cast<const half2 *>(&MUL),
+                        *reinterpret_cast<const half2 *>(&ADD));
+    return frag_b;
+}
+
+__device__ __forceinline__ std::array<__half2, 2> dequant_w3(int q) {
+    const int LO = 0x00070007;
+    const int HI = 0x00700070;
+    const int EX = 0x64006400;
+    // Guarantee that the `(a & b) | c` operations are LOP3s.
+    int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+    int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
+    // We want signed int3 outputs, hence we fuse the `-4` symmetric zero point directly into `SUB` and `ADD`.
+    const int SUB = 0x64046404;
+    const int MUL = 0x2c002c00;
+    const int ADD = 0xd440d440;
+    std::array<__half2, 2> half2x2;
+    half2x2[0] = __hsub2(*reinterpret_cast<half2 *>(&lo), *reinterpret_cast<const half2 *>(&SUB));
+    half2x2[1] = __hfma2(*reinterpret_cast<half2 *>(&hi), *reinterpret_cast<const half2 *>(&MUL),
+                         *reinterpret_cast<const half2 *>(&ADD));
+    return half2x2;
 }
 
 template <typename scalar_t, int group_size, int block_size>
 __global__ void gemv_i3_v2_kernel(const scalar_t *__restrict__ input, const uint8_t *__restrict__ weight,
-                               const scalar_t *__restrict__ scales, const scalar_t *__restrict__ bias,
-                               scalar_t *__restrict__ output) {
-                                // TODO: pass as args
-                                constexpr int N = 4096;
-                               constexpr int chunk_size = N / 8;
+                                  const scalar_t *__restrict__ scales, const scalar_t *__restrict__ bias,
+                                  scalar_t *__restrict__ output) {
+    constexpr bool debug = false;
+    constexpr int K = 4096;
+    constexpr int chunk_size = K / 8;
     const uint8_t *weight_row0 = weight + blockIdx.x * (chunk_size * 3);
-    const uint8_t* weight_row1 = weight_row0 + chunk_size;
-    const uint8_t* weight_row2 = weight_row1 + chunk_size;
+    const uint8_t *weight_row1 = weight_row0 + chunk_size;
+    const uint8_t *weight_row2 = weight_row1 + chunk_size;
 
-    const scalar_t *scales_row = scales + blockIdx.x * (N / group_size);
+    const scalar_t *scales_row = scales + blockIdx.x * (K / group_size);
+
+    constexpr int thr_tile_size = 128;
+    constexpr int s_num_cols = thr_tile_size * sizeof(scalar_t) / sizeof(float4);
+    __shared__ float4 s_input[K / (sizeof(float4) / sizeof(scalar_t))];
+
+    // load input tile into shared memory
+#pragma unroll
+    for (int s = 0; s < K / 8; s += block_size) {
+        const int i = s + threadIdx.x;
+        const int s_row = i / s_num_cols;
+        const int s_col = i - s_row * s_num_cols;
+        s_input[s_row * s_num_cols + lop3<(0xf0 ^ 0xcc) & 0xaa>(s_row, s_col, s_num_cols - 1)] = ((float4 *)input)[i];
+        // if (s_row * s_num_cols + ((s_row ^ s_col) & (s_num_cols - 1)) >=
+        //         K / (sizeof(float4) / sizeof(scalar_t)) &&
+        //     blockIdx.x == 0) {
+        //     printf("error tid=%d idx=%d row=%d col=%d\n", threadIdx.x,
+        //            s_row * s_num_cols + ((s_row ^ s_col) & (s_num_cols - 1)), s_row, s_col);
+        // }
+    }
+    __syncthreads();
+
+    if constexpr (debug) {
+        if (threadIdx.x + blockIdx.x == 0) {
+            printf("s_input size=%d, values=[\n", (int)sizeof(s_input));
+            for (int i = 0; i < K; i++) {
+                const scalar_t value = ((scalar_t *)s_input)[i];
+                printf("%f, ", __half2float(value));
+                if ((i + 1) % thr_tile_size == 0) {
+                    printf("\n");
+                }
+            }
+            printf("]\n");
+        }
+    }
 
     float sum = 0.f;
 
-    #pragma unroll
-    for (int s =  0; s < N; s += block_size * 128) {
-        const int i = s+ threadIdx.x * 128;
+#pragma unroll
+    for (int start = 0; start < K; start += block_size * thr_tile_size) {
+        const int i = start + threadIdx.x * thr_tile_size;
+
+        int qw_packed[12];
+        *(int4 *)&qw_packed[0] = ((int4 *)weight_row0)[i / thr_tile_size];
+        *(int4 *)&qw_packed[4] = ((int4 *)weight_row1)[i / thr_tile_size];
+        *(int4 *)&qw_packed[8] = ((int4 *)weight_row2)[i / thr_tile_size];
+
+        __half2 w[64];
+
+#pragma unroll
+        for (int j = 0; j < 12; j++) {
+            *(std::array<__half2, 2> *)&w[j * 4 + 0] = dequant_w3(qw_packed[j]);
+            *(std::array<__half2, 2> *)&w[j * 4 + 2] = dequant_w3(qw_packed[j] >> 8);
+        }
+
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            // int qw = ((qw_packed[0 + j] >> (3 - 0)) & 0x11111111) | ((qw_packed[4 + j] >> (3 - 1)) & 0x22222222) |
+            //          ((qw_packed[8 + j] >> (3 - 2)) & 0x44444444);
+            int qw =
+                lop3<(0xf0 & 0xcc) | 0xaa>(qw_packed[0 + j] >> (3 - 0), 0x11111111,
+                                           lop3<(0xf0 & 0xcc) | 0xaa>(qw_packed[4 + j] >> (3 - 1), 0x22222222,
+                                                                      ((qw_packed[8 + j] >> (3 - 2)) & 0x44444444)));
+            *(std::array<__half2, 2> *)&w[48 + 4 * j + 0] = dequant_w3(qw);
+            *(std::array<__half2, 2> *)&w[48 + 4 * j + 2] = dequant_w3(qw >> 8);
+        }
+
+        scalar_t scale = scales_row[i / group_size];
+
+        if constexpr (debug) {
+            if (threadIdx.x + blockIdx.x == 0) {
+                float scale_fp32 = __half2float(scale);
+                printf("dequent weight:\n");
+                for (int j = 0; j < 128; j++) {
+                    float w_fp32 = __half2float(((__half *)w)[j]);
+                    printf("%f, ", w_fp32 * scale_fp32);
+                }
+                printf("\n");
+            }
+        }
+
+        __half2 x[64];
+
+#pragma unroll
+        for (int j = 0; j < 128; j += 8) {
+            const int s_idx = (i + j) / (sizeof(float4) / sizeof(scalar_t));
+            const int s_row = s_idx / s_num_cols;
+            const int s_col = s_idx - s_row * s_num_cols;
+            *(float4 *)&x[j / 2] =
+                s_input[s_row * s_num_cols + lop3<(0xf0 ^ 0xcc) & 0xaa>(s_row, s_col, s_num_cols - 1)];
+        }
+
+        if constexpr (debug) {
+            if (threadIdx.x + blockIdx.x == 0) {
+                printf("input:\n");
+                for (int j = 0; j < 128; j++) {
+                    float x_f = __half2float(((__half *)x)[j]);
+                    printf("%f, ", x_f);
+                }
+                printf("\n");
+            }
+        }
+
+        // // load
+        // const int s_row = i * sizeof(scalar_t) / sizeof(float4);
+        // ((float4 *)x)[0] = s_input[s_row * thr_tile_size_f4 + (s_row ^ 0)];
+        // ((float4 *)x)[1] = s_input[s_row * thr_tile_size_f4 + (s_row ^ 1)];
+
+        // ((float4 *)x)[0] = ((float4 *)input)[i / 128 + 0 * block_size];
+
+        // ((FragB *)fb)[0] = dequant_w3(wi[0]);
+        // ((FragB *)fb)[1] = dequant_w3(wi[0] >> 4);
+
+        // ((float4 *)x)[1] = ((float4 *)input)[i / 128 + 1 * block_size];
+
+        // ((FragB *)fb)[2] = dequant(wi[1]);
+        // ((FragB *)fb)[3] = dequant(wi[1] >> 4);
+
+        // ((float4 *)x)[2] = ((float4 *)input)[i / 128 + 2 * block_size];
+
+        // ((FragB *)fb)[4] = dequant(wi[2]);
+        // ((FragB *)fb)[5] = dequant(wi[2] >> 4);
+
+        // ((float4 *)x)[3] = ((float4 *)input)[i / 128 + 3 * block_size];
+
+        // ((FragB *)fb)[6] = dequant(wi[3]);
+        // ((FragB *)fb)[7] = dequant(wi[3] >> 4);
+
+        // uint w2[4];
+        // *(uint4 *)w2 = ((uint4 *)weight_row2)[i / 128];
+
+        // float2 f2;
+        // #pragma unroll
+        // for (int j  = 0; j < 16; j++) {
+        //     f2 = __half22float2(__hmul2(x[j], fb[j]));
+        //     partial_sum += f2.x + f2.y;
+        // }
+
+        // ((float4*)x)[0] = ((float4*)input)[i / 128 + 4 * block_size];
+        // ((FragB*)fb)[0] = dequant(w1[0]);
+        // ((FragB*)fb)[1] = dequant(w1[0] >> 4);
+        // ((float4*)x)[1] = ((float4*)input)[i / 128 + 5 * block_size];
+        // ((FragB*)fb)[2] = dequant(w1[1]);
+        // ((FragB*)fb)[3] = dequant(w1[1] >> 4);
+        // ((float4*)x)[2] = ((float4*)input)[i / 128 + 6 * block_size];
+        // ((FragB*)fb)[4] = dequant(w1[2]);
+        // ((FragB*)fb)[5] = dequant(w1[2] >> 4);
+        // ((float4*)x)[3] = ((float4*)input)[i / 128 + 7 * block_size];
+        // ((FragB*)fb)[6] = dequant(w1[3]);
+        // ((FragB*)fb)[7] = dequant(w1[3] >> 4);
+
+        // #pragma unroll
+        // for (int j  = 0; j < 16; j++) {
+        //     f2 = __half22float2(__hmul2(x[j], fb[j]));
+        //     partial_sum += f2.x + f2.y;
+        //     // f2 = __half22float2(x[j]);
+        //     // partial_sum += f2.x + f2.y;
+        //     // f2 = __half22float2(fb[j]);
+        //     // partial_sum += f2.x + f2.y;
+        // }
+
+        // ((float4*)x)[0] = ((float4*)input)[i / 128 + 8 * block_size];
+        // ((FragB*)fb)[0] = dequant(w2[0]);
+        // ((FragB*)fb)[1] = dequant(w2[0] >> 4);
+        // ((float4*)x)[1] = ((float4*)input)[i / 128 + 9 * block_size];
+        // ((FragB*)fb)[2] = dequant(w2[1]);
+        // ((FragB*)fb)[3] = dequant(w2[1] >> 4);
+        // ((float4*)x)[2] = ((float4*)input)[i / 128 + 10 * block_size];
+        // ((FragB*)fb)[4] = dequant(w2[2]);
+        // ((FragB*)fb)[5] = dequant(w2[2] >> 4);
+        // ((float4*)x)[3] = ((float4*)input)[i / 128 + 11 * block_size];
+        // ((FragB*)fb)[6] = dequant(w2[3]);
+        // ((FragB*)fb)[7] = dequant(w2[3] >> 4);
+
+        // #pragma unroll
+        // for (int j  = 0; j < 16; j++) {
+        //     f2 = __half22float2(__hmul2(x[j], fb[j]));
+        //     partial_sum += f2.x + f2.y;
+        //     // f2 = __half22float2(x[j]);
+        //     // partial_sum += f2.x + f2.y;
+        //     // f2 = __half22float2(fb[j]);
+        //     // partial_sum += f2.x + f2.y;
+        // }
+
+        // ((float4 *)x)[0] = ((float4 *)input)[i / 128 + 12 * block_size];
+        // ((float4 *)x)[1] = ((float4 *)input)[i / 128 + 13 * block_size];
+        // ((float4 *)x)[2] = ((float4 *)input)[i / 128 + 14 * block_size];
+        // ((float4 *)x)[3] = ((float4 *)input)[i / 128 + 15 * block_size];
+
+        // uint32_t w4_x = (w0[0] >> 3) | (w1[0] >> 2) | (w2[0] >> 1);
+        // // uint32_t w4_x = (w0[0] >> 3);
+        // ((FragB*)fb)[0] = dequant(w4_x);
+        // ((FragB*)fb)[1] = dequant(w4_x >> 4);
+        // uint32_t w4_y = (w0[1] >> 3) | (w1[1] >> 2) | (w2[1] >> 1);
+        // // uint32_t w4_y = (w0[1] >> 3) ;
+        // ((FragB*)fb)[2] = dequant(w4_y);
+        // ((FragB*)fb)[3] = dequant(w4_y >> 4);
+        // uint32_t w4_z = (w0[2] >> 3) | (w1[2] >> 2) | (w2[2] >> 1);
+        // // uint32_t w4_z = (w0[2] >> 3) ;
+        // ((FragB*)fb)[4] = dequant(w4_z);
+        // ((FragB*)fb)[5] = dequant(w4_z >> 4);
+        // uint32_t w4_w = (w0[3] >> 3) | (w1[3] >> 2) | (w2[3] >> 1);
+        // // uint32_t w4_w = (w0[3] >> 3) ;
+        // ((FragB*)fb)[6] = dequant(w4_w);
+        // ((FragB*)fb)[7] = dequant(w4_w >> 4);
+
         float partial_sum = 0.f;
 
-        uint w0[4];
-        *(uint4*) w0 = ((uint4*)weight_row0)[i / 128];
-        uint w1[4];
-        *(uint4*) w1 = ((uint4*)weight_row1)[i / 128];
-
-        half2 fb[16];
-        half2 x[16];
-        ((float4*)x)[0] = ((float4*)input)[i / 128 + 0 * block_size];
-
-        ((FragB*)fb)[0] = dequant(w0[0]);
-        ((FragB*)fb)[1] = dequant(w0[0] >> 4);
-
-        ((float4*)x)[1] = ((float4*)input)[i / 128 + 1 * block_size];
-
-        ((FragB*)fb)[2] = dequant(w0[1]);
-        ((FragB*)fb)[3] = dequant(w0[1] >> 4);
-
-        ((float4*)x)[2] = ((float4*)input)[i / 128 + 2 * block_size];
-
-        ((FragB*)fb)[4] = dequant(w0[2]);
-        ((FragB*)fb)[5] = dequant(w0[2] >> 4);
-
-        ((float4*)x)[3] = ((float4*)input)[i / 128 + 3 * block_size];
-
-        ((FragB*)fb)[6] = dequant(w0[3]);
-        ((FragB*)fb)[7] = dequant(w0[3] >> 4);
-
-        uint w2[4];
-        *(uint4*) w2 = ((uint4*)weight_row2)[i / 128];
-
-        float2 f2;
-        #pragma unroll
-        for (int j  = 0; j < 16; j++) {
-            f2 = __half22float2(__hmul2(x[j], fb[j]));
-            partial_sum += f2.x + f2.y;
+#pragma unroll
+        for (int j = 0; j < 64; j++) {
+            float2 partial_f2 = __half22float2(__hmul2(x[j], w[j]));
+            partial_sum += partial_f2.x + partial_f2.y;
         }
 
-        ((float4*)x)[0] = ((float4*)input)[i / 128 + 4 * block_size];
-        ((FragB*)fb)[0] = dequant(w1[0]);
-        ((FragB*)fb)[1] = dequant(w1[0] >> 4);
-        ((float4*)x)[1] = ((float4*)input)[i / 128 + 5 * block_size];
-        ((FragB*)fb)[2] = dequant(w1[1]);
-        ((FragB*)fb)[3] = dequant(w1[1] >> 4);
-        ((float4*)x)[2] = ((float4*)input)[i / 128 + 6 * block_size];
-        ((FragB*)fb)[4] = dequant(w1[2]);
-        ((FragB*)fb)[5] = dequant(w1[2] >> 4);
-        ((float4*)x)[3] = ((float4*)input)[i / 128 + 7 * block_size];
-        ((FragB*)fb)[6] = dequant(w1[3]);
-        ((FragB*)fb)[7] = dequant(w1[3] >> 4);
-
-        #pragma unroll
-        for (int j  = 0; j < 16; j++) {
-            f2 = __half22float2(__hmul2(x[j], fb[j]));
-            partial_sum += f2.x + f2.y;
-            // f2 = __half22float2(x[j]);
-            // partial_sum += f2.x + f2.y;
-            // f2 = __half22float2(fb[j]);
-            // partial_sum += f2.x + f2.y;
-        }
-
-        ((float4*)x)[0] = ((float4*)input)[i / 128 + 8 * block_size];
-        ((FragB*)fb)[0] = dequant(w2[0]);
-        ((FragB*)fb)[1] = dequant(w2[0] >> 4);
-        ((float4*)x)[1] = ((float4*)input)[i / 128 + 9 * block_size];
-        ((FragB*)fb)[2] = dequant(w2[1]);
-        ((FragB*)fb)[3] = dequant(w2[1] >> 4);
-        ((float4*)x)[2] = ((float4*)input)[i / 128 + 10 * block_size];
-        ((FragB*)fb)[4] = dequant(w2[2]);
-        ((FragB*)fb)[5] = dequant(w2[2] >> 4);
-        ((float4*)x)[3] = ((float4*)input)[i / 128 + 11 * block_size];
-        ((FragB*)fb)[6] = dequant(w2[3]);
-        ((FragB*)fb)[7] = dequant(w2[3] >> 4);
-
-        #pragma unroll
-        for (int j  = 0; j < 16; j++) {
-            f2 = __half22float2(__hmul2(x[j], fb[j]));
-            partial_sum += f2.x + f2.y;
-            // f2 = __half22float2(x[j]);
-            // partial_sum += f2.x + f2.y;
-            // f2 = __half22float2(fb[j]);
-            // partial_sum += f2.x + f2.y;
-        }
-
-        scalar_t sc = scales_row[i / group_size];
-
-        ((float4*)x)[0] = ((float4*)input)[i / 128 + 12 * block_size];
-        ((float4*)x)[1] = ((float4*)input)[i / 128 + 13 * block_size];
-        ((float4*)x)[2] = ((float4*)input)[i / 128 + 14 * block_size];
-        ((float4*)x)[3] = ((float4*)input)[i / 128 + 15 * block_size];
-
-        uint32_t w4_x = (w0[0] >> 3) | (w1[0] >> 2) | (w2[0] >> 1);
-        // uint32_t w4_x = (w0[0] >> 3);
-        ((FragB*)fb)[0] = dequant(w4_x);
-        ((FragB*)fb)[1] = dequant(w4_x >> 4);
-        uint32_t w4_y = (w0[1] >> 3) | (w1[1] >> 2) | (w2[1] >> 1);
-        // uint32_t w4_y = (w0[1] >> 3) ;
-        ((FragB*)fb)[2] = dequant(w4_y);
-        ((FragB*)fb)[3] = dequant(w4_y >> 4);
-        uint32_t w4_z = (w0[2] >> 3) | (w1[2] >> 2) | (w2[2] >> 1);
-        // uint32_t w4_z = (w0[2] >> 3) ;
-        ((FragB*)fb)[4] = dequant(w4_z);
-        ((FragB*)fb)[5] = dequant(w4_z >> 4);
-        uint32_t w4_w = (w0[3] >> 3) | (w1[3] >> 2) | (w2[3] >> 1);
-        // uint32_t w4_w = (w0[3] >> 3) ;
-        ((FragB*)fb)[6] = dequant(w4_w);
-        ((FragB*)fb)[7] = dequant(w4_w >> 4);
-
-        #pragma unroll
-        for (int j  = 0; j < 16; j++) {
-            f2 = __half22float2(__hmul2(x[j], fb[j]));
-            partial_sum += f2.x + f2.y;
-            // f2 = __half22float2(x[j]);
-            // partial_sum += f2.x + f2.y;
-            // f2 = __half22float2(fb[j]);
-            // partial_sum += f2.x + f2.y;
-        }
-
-        sum += partial_sum * float(sc);
+        sum += partial_sum * __half2float(scale);
     }
 
     sum = block_reduce_sum_0<block_size>(sum);
@@ -441,10 +539,10 @@ __global__ void gemv_i3_v2_kernel(const scalar_t *__restrict__ input, const uint
     }
 }
 
-void gemv_i3_cuda(const __half *input, const uint8_t *weight, const __half *scales, const __half* bias, __half *output, int M, int N) {
+void gemv_i3_cuda(const __half *input, const uint8_t *weight, const __half *scales, const __half *bias, __half *output,
+                  int N, int K) {
     constexpr int block_size = 32;
     constexpr int group_size = 128;
-    const int grid_size = M;
-    gemv_i3_v2_kernel<__half, group_size, block_size>
-        <<<grid_size, block_size>>>(input, weight, scales, bias, output);
+    const int grid_size = N;
+    gemv_i3_v2_kernel<__half, group_size, block_size><<<grid_size, block_size>>>(input, weight, scales, bias, output);
 }

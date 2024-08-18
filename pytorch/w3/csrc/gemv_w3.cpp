@@ -62,23 +62,21 @@ void gemv_i3_cuda(const __half *input, const uint8_t *weight, const __half *scal
                   int M, int N);
 
 torch::Tensor gemv_i3(torch::Tensor input, torch::Tensor weight, torch::Tensor scales, torch::Tensor bias) {
-    // void gemv_i3(const __half *input, const uint8_t *weight, const __half *scales, const __half* bias, __half
-    // *output, int M, int N) {
-    const int M = bias.size(0);
-    const int N = input.size(-1);
+    const int N = bias.size(0);
+    const int K = input.size(-1);
 
     constexpr int group_size = 128;
-    TORCH_CHECK(input.is_cuda() && input.is_contiguous() && input.numel() == input.size(-1) &&
+    TORCH_CHECK(input.is_cuda() && input.is_contiguous() && input.numel() == K &&
                 input.nbytes() % (4 * sizeof(float)) == 0);
-    TORCH_CHECK(weight.is_cuda() && weight.is_contiguous() && weight.ndimension() == 1 && weight.numel() * 8 / 3 == M* N &&
+    TORCH_CHECK(weight.is_cuda() && weight.is_contiguous() && weight.ndimension() == 2 && weight.size(0) == N && weight.size(1) == K * 3 / 8 &&
                 weight.dtype() == torch::kUInt8 && weight.nbytes() % (4 * sizeof(float)) == 0);
-    TORCH_CHECK(scales.is_cuda() && scales.is_contiguous() && scales.numel() * group_size == M * N &&
+    TORCH_CHECK(scales.is_cuda() && scales.is_contiguous() && scales.numel() * group_size == K * N &&
                 scales.dtype() == input.dtype());
     TORCH_CHECK(bias.is_cuda() && bias.is_contiguous() && bias.ndimension() == 1 &&
                 bias.nbytes() % (4 * sizeof(float)) == 0 && bias.dtype() == input.dtype());
 
     auto output_shape = input.sizes().vec();
-    output_shape.back() = M;
+    output_shape.back() = N;
     torch::Tensor output = torch::empty(output_shape, input.options());
 
     AT_DISPATCH_SWITCH(input.scalar_type(), "gemv_i3_cuda", AT_DISPATCH_CASE(at::ScalarType::Half, [&] {
@@ -87,7 +85,7 @@ torch::Tensor gemv_i3(torch::Tensor input, torch::Tensor weight, torch::Tensor s
                                         weight.const_data_ptr<uint8_t>(),
                                         (const cuda_scalar_t *)scales.const_data_ptr<scalar_t>(),
                                         (const cuda_scalar_t *)bias.const_data_ptr<scalar_t>(),
-                                        (cuda_scalar_t *)output.mutable_data_ptr<scalar_t>(), M, N);
+                                        (cuda_scalar_t *)output.mutable_data_ptr<scalar_t>(), N, K);
                        }));
 
     return output;
