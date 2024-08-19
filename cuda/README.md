@@ -69,3 +69,9 @@ sudo -E ncu -o profile -f -k memcpy_cuda_kernel -s 2 -c 4 memcpy
 ```
 
 See https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html for usage details.
+
+# SM Occupancy
+
+https://docs.nvidia.com/gameworks/content/developertools/desktop/analysis/report/cudaexperiments/kernellevel/achievedoccupancy.htm
+
+Use Nsight Compute to calculate theoretical max occupancy.
