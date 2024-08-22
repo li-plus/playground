@@ -50,7 +50,20 @@ A100 GPU white paper: https://images.nvidia.com/aem-dam/en-zz/Solutions/data-cen
 
 # Nsight System
 
-WIP
+References:
+* https://docs.nvidia.com/nsight-systems/UserGuide/index.html
+* https://gist.github.com/mcarilli/376821aa1a7182dfcf59928a7cde3223
+
+Profile command:
+```sh
+nsys profile -t cuda,nvtx,osrt,cudnn,cublas -s cpu -o nsys_report -f true -e NSYS_NVTX_PROFILER_REGISTER_ONLY=0 --cudabacktrace=kernel --python-backtrace=cuda --python-sampling=true \
+    python3 multi_stream.py
+```
+
+To capture activities within specific NVTX range only, add these options:
+```sh
+-c nvtx -p forward
+```
 
 # Nsight Compute
 
@@ -75,3 +88,6 @@ See https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html for usage
 https://docs.nvidia.com/gameworks/content/developertools/desktop/analysis/report/cudaexperiments/kernellevel/achievedoccupancy.htm
 
 Use Nsight Compute to calculate theoretical max occupancy.
+
+
+
