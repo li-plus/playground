@@ -1,6 +1,10 @@
 TARGETS := noop fuse memcpy reduce_sum float4 sgemv hgemv sched coalesce transpose loop
 
-CUDAFLAGS := -std=c++17 -gencode arch=compute_70,code=sm_70 -O3 -lineinfo
+CUDAFLAGS := -std=c++17 -gencode arch=compute_80,code=sm_80 -O3 -lineinfo
+
+ifeq ($(VERBOSE), 1)
+	CUDAFLAGS += -Xptxas=-v
+endif
 
 LIBRARIES := -lcublas
 
