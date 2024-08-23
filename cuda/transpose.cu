@@ -6,6 +6,8 @@
 #include <cuda/barrier>
 #include <cuda/pipeline>
 
+namespace cg = cooperative_groups;
+
 constexpr int TILE_DIM = 32;
 constexpr int BLOCK_ROWS = 8;
 
@@ -35,6 +37,27 @@ __global__ void transpose_coalesced_kernel(float *odata, const float *idata, int
         odata[(y + j) * M + x] = tile[threadIdx.x][threadIdx.y + j];
 }
 
+__global__ void transpose_coalesced_async_cg_kernel(float *odata, const float *idata, int M, int N) {
+    __shared__ float s_tile[TILE_DIM][TILE_DIM + 1]; // prevent bank conflict
+
+    auto block = cg::this_thread_block();
+    auto tile = cg::tiled_partition<TILE_DIM>(block);
+
+    int x = blockIdx.x * TILE_DIM;
+    int y = blockIdx.y * TILE_DIM + threadIdx.y;
+
+    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS)
+        cg::memcpy_async(tile, s_tile[threadIdx.y + j], &idata[(y + j) * N + x], sizeof(float) * tile.size());
+
+    x = blockIdx.y * TILE_DIM + threadIdx.x; // transpose block offset
+    y = blockIdx.x * TILE_DIM + threadIdx.y;
+
+    cg::wait(block);
+
+    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS)
+        odata[(y + j) * M + x] = s_tile[threadIdx.x][threadIdx.y + j];
+}
+
 __global__ void transpose_swizzle_kernel(float *odata, const float *idata, int M, int N) {
     __shared__ float tile[TILE_DIM][TILE_DIM];
 
@@ -53,9 +76,7 @@ __global__ void transpose_swizzle_kernel(float *odata, const float *idata, int M
         odata[(y + j) * M + x] = tile[threadIdx.x][threadIdx.x ^ (threadIdx.y + j)];
 }
 
-__global__ void transpose_async_barrier_swizzle_kernel(float *odata, const float *idata, int M, int N) {
-    namespace cg = cooperative_groups;
-
+__global__ void transpose_swizzle_async_barrier_kernel(float *odata, const float *idata, int M, int N) {
     __shared__ float tile[TILE_DIM][TILE_DIM];
 
     __shared__ cuda::barrier<cuda::thread_scope_block> barrier;
@@ -81,7 +102,7 @@ __global__ void transpose_async_barrier_swizzle_kernel(float *odata, const float
         odata[(y + j) * M + x] = tile[threadIdx.x][threadIdx.x ^ (threadIdx.y + j)];
 }
 
-__global__ void transpose_async_pipeline_swizzle_kernel(float *odata, const float *idata, int M, int N) {
+__global__ void transpose_swizzle_async_pipeline_kernel(float *odata, const float *idata, int M, int N) {
     __shared__ float tile[TILE_DIM][TILE_DIM];
 
     int x = blockIdx.x * TILE_DIM + threadIdx.x;
@@ -114,9 +135,10 @@ __global__ void transpose_async_pipeline_swizzle_kernel(float *odata, const floa
 
 make_launcher(transpose_naive_cuda, transpose_naive_kernel);
 make_launcher(transpose_coalesced_cuda, transpose_coalesced_kernel);
+make_launcher(transpose_coalesced_async_cg_cuda, transpose_coalesced_async_cg_kernel);
 make_launcher(transpose_swizzle_cuda, transpose_swizzle_kernel);
-make_launcher(transpose_async_barrier_swizzle_cuda, transpose_async_barrier_swizzle_kernel);
-make_launcher(transpose_async_pipeline_swizzle_cuda, transpose_async_pipeline_swizzle_kernel);
+make_launcher(transpose_swizzle_async_barrier_cuda, transpose_swizzle_async_barrier_kernel);
+make_launcher(transpose_swizzle_async_pipeline_cuda, transpose_swizzle_async_pipeline_kernel);
 
 #undef make_launcher
 
@@ -144,52 +166,31 @@ int main() {
     transpose_naive_cuda(d_output, d_input, M, N);
     CHECK_CUDA(cudaMemcpy(h_output_ref, d_output, N * M * sizeof(float), cudaMemcpyDeviceToHost));
 
-    CHECK_CUDA(cudaMemset(d_output, 0, N * M * sizeof(float)));
-    transpose_coalesced_cuda(d_output, d_input, M, N);
-    CHECK_CUDA(cudaMemcpy(h_output_out, d_output, N * M * sizeof(float), cudaMemcpyDeviceToHost));
-    check_is_close(h_output_out, h_output_ref, N * M);
+    auto run_and_check = [&](decltype(transpose_naive_cuda) fn) {
+        CHECK_CUDA(cudaMemset(d_output, 0, N * M * sizeof(float)));
+        fn(d_output, d_input, M, N);
+        CHECK_CUDA(cudaMemcpy(h_output_out, d_output, N * M * sizeof(float), cudaMemcpyDeviceToHost));
+        check_is_close(h_output_out, h_output_ref, N * M);
+    };
 
-    CHECK_CUDA(cudaMemset(d_output, 0, N * M * sizeof(float)));
-    transpose_swizzle_cuda(d_output, d_input, M, N);
-    CHECK_CUDA(cudaMemcpy(h_output_out, d_output, N * M * sizeof(float), cudaMemcpyDeviceToHost));
-    check_is_close(h_output_out, h_output_ref, N * M);
+    run_and_check(transpose_coalesced_cuda);
+    run_and_check(transpose_coalesced_async_cg_cuda);
+    run_and_check(transpose_swizzle_cuda);
+    run_and_check(transpose_swizzle_async_barrier_cuda);
+    run_and_check(transpose_swizzle_async_pipeline_cuda);
 
-    CHECK_CUDA(cudaMemset(d_output, 0, N * M * sizeof(float)));
-    transpose_async_barrier_swizzle_cuda(d_output, d_input, M, N);
-    CHECK_CUDA(cudaMemcpy(h_output_out, d_output, N * M * sizeof(float), cudaMemcpyDeviceToHost));
-    check_is_close(h_output_out, h_output_ref, N * M);
+    auto benchmark = [&](decltype(transpose_naive_cuda) fn, const char *name) {
+        const float elapsed = timeit([=] { fn(d_output, d_input, M, N); }, 2, 10);
+        const float bandwidth = 2 * M * N * sizeof(float) / 1e9 / elapsed;
+        printf("[%s] elapsed %.3f us, bandwidth %.3f GB/s\n", name, elapsed * 1e6, bandwidth);
+    };
 
-    CHECK_CUDA(cudaMemset(d_output, 0, N * M * sizeof(float)));
-    transpose_async_pipeline_swizzle_cuda(d_output, d_input, M, N);
-    CHECK_CUDA(cudaMemcpy(h_output_out, d_output, N * M * sizeof(float), cudaMemcpyDeviceToHost));
-    check_is_close(h_output_out, h_output_ref, N * M);
-
-    // benchmark
-    {
-        const float elapsed = timeit([=] { transpose_naive_cuda(d_output, d_input, M, N); }, 2, 10);
-        const float bandwidth = 2 * M * N * sizeof(float) / 1e9 / elapsed;
-        printf("[naive] elapsed %.3f us, bandwidth %.3f GB/s\n", elapsed * 1e6, bandwidth);
-    }
-    {
-        const float elapsed = timeit([=] { transpose_coalesced_cuda(d_output, d_input, M, N); }, 2, 10);
-        const float bandwidth = 2 * M * N * sizeof(float) / 1e9 / elapsed;
-        printf("[coalesced] elapsed %.3f us, bandwidth %.3f GB/s\n", elapsed * 1e6, bandwidth);
-    }
-    {
-        const float elapsed = timeit([=] { transpose_swizzle_cuda(d_output, d_input, M, N); }, 2, 10);
-        const float bandwidth = 2 * M * N * sizeof(float) / 1e9 / elapsed;
-        printf("[swizzle] elapsed %.3f us, bandwidth %.3f GB/s\n", elapsed * 1e6, bandwidth);
-    }
-    {
-        const float elapsed = timeit([=] { transpose_async_barrier_swizzle_cuda(d_output, d_input, M, N); }, 2, 10);
-        const float bandwidth = 2 * M * N * sizeof(float) / 1e9 / elapsed;
-        printf("[async-barrier] elapsed %.3f us, bandwidth %.3f GB/s\n", elapsed * 1e6, bandwidth);
-    }
-    {
-        const float elapsed = timeit([=] { transpose_async_pipeline_swizzle_cuda(d_output, d_input, M, N); }, 2, 10);
-        const float bandwidth = 2 * M * N * sizeof(float) / 1e9 / elapsed;
-        printf("[async-pipeline] elapsed %.3f us, bandwidth %.3f GB/s\n", elapsed * 1e6, bandwidth);
-    }
+    benchmark(transpose_naive_cuda, "naive");
+    benchmark(transpose_coalesced_cuda, "coalesced");
+    benchmark(transpose_coalesced_async_cg_cuda, "coalesced-async-cg");
+    benchmark(transpose_swizzle_cuda, "swizzle");
+    benchmark(transpose_swizzle_async_barrier_cuda, "swizzle-async-barrier");
+    benchmark(transpose_swizzle_async_pipeline_cuda, "swizzle-async-pipeline");
 
     CHECK_CUDA(cudaFreeHost(h_input));
     CHECK_CUDA(cudaFreeHost(h_output_ref));
