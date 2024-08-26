@@ -78,7 +78,12 @@ bash nsight-compute-linux-2024.3.0.15-34567288.run
 
 Profile kernel `memcpy_cuda_kernel` on server. Collect results of 4 kernels after skipping 2 kernels.
 ```sh
-sudo -E ncu -o profile -f -k memcpy_cuda_kernel -s 2 -c 4 memcpy
+sudo -E $(which ncu) -o profile -f -k memcpy_cuda_kernel -s 2 -c 4 ./memcpy
+```
+
+To analyze memory (e.g. bank conflicts), add options:
+```sh
+--section MemoryWorkloadAnalysis --section MemoryWorkloadAnalysis_Chart --section MemoryWorkloadAnalysis_Tables
 ```
 
 See https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html for usage details.

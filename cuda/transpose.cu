@@ -19,6 +19,24 @@ __global__ void transpose_naive_kernel(float *odata, const float *idata, int M, 
         odata[x * M + (y + j)] = idata[(y + j) * N + x];
 }
 
+__global__ void transpose_coalesced_bank_conflict_kernel(float *odata, const float *idata, int M, int N) {
+    __shared__ float tile[TILE_DIM][TILE_DIM]; 
+
+    int x = blockIdx.x * TILE_DIM + threadIdx.x;
+    int y = blockIdx.y * TILE_DIM + threadIdx.y;
+
+    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS)
+        tile[threadIdx.y + j][threadIdx.x] = idata[(y + j) * N + x];
+
+    __syncthreads();
+
+    x = blockIdx.y * TILE_DIM + threadIdx.x; // transpose block offset
+    y = blockIdx.x * TILE_DIM + threadIdx.y;
+
+    for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS)
+        odata[(y + j) * M + x] = tile[threadIdx.x][threadIdx.y + j];
+}
+
 __global__ void transpose_coalesced_kernel(float *odata, const float *idata, int M, int N) {
     __shared__ float tile[TILE_DIM][TILE_DIM + 1]; // prevent bank conflict
 
@@ -134,6 +152,7 @@ __global__ void transpose_swizzle_async_pipeline_kernel(float *odata, const floa
     }
 
 make_launcher(transpose_naive_cuda, transpose_naive_kernel);
+make_launcher(transpose_coalesced_bank_conflict_cuda, transpose_coalesced_bank_conflict_kernel);
 make_launcher(transpose_coalesced_cuda, transpose_coalesced_kernel);
 make_launcher(transpose_coalesced_async_cg_cuda, transpose_coalesced_async_cg_kernel);
 make_launcher(transpose_swizzle_cuda, transpose_swizzle_kernel);
@@ -174,6 +193,7 @@ int main() {
     };
 
     run_and_check(transpose_coalesced_cuda);
+    run_and_check(transpose_coalesced_bank_conflict_cuda);
     run_and_check(transpose_coalesced_async_cg_cuda);
     run_and_check(transpose_swizzle_cuda);
     run_and_check(transpose_swizzle_async_barrier_cuda);
@@ -186,6 +206,7 @@ int main() {
     };
 
     benchmark(transpose_naive_cuda, "naive");
+    benchmark(transpose_coalesced_bank_conflict_cuda, "coalesced-bc");
     benchmark(transpose_coalesced_cuda, "coalesced");
     benchmark(transpose_coalesced_async_cg_cuda, "coalesced-async-cg");
     benchmark(transpose_swizzle_cuda, "swizzle");
