@@ -69,11 +69,11 @@ int main() {
 
     // cuda implementation
     sgemv_cuda(d_A, d_x, d_y, M, N);
-    CHECK_CUDA(cudaMemcpyAsync(h_y, d_y, M * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_y, d_y, M * sizeof(float), cudaMemcpyDeviceToHost));
 
     // cublas implementation
     sgemv_cublas(cublas_handle, d_A, d_x, d_y_ref, M, N);
-    CHECK_CUDA(cudaMemcpyAsync(h_y_ref, d_y_ref, M * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_y_ref, d_y_ref, M * sizeof(float), cudaMemcpyDeviceToHost));
 
     // check results
     check_is_close(h_y, h_y_ref, M, 1e-3, 1e-3);

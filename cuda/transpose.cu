@@ -20,7 +20,7 @@ __global__ void transpose_naive_kernel(float *odata, const float *idata, int M, 
 }
 
 __global__ void transpose_coalesced_bank_conflict_kernel(float *odata, const float *idata, int M, int N) {
-    __shared__ float tile[TILE_DIM][TILE_DIM]; 
+    __shared__ float tile[TILE_DIM][TILE_DIM];
 
     int x = blockIdx.x * TILE_DIM + threadIdx.x;
     int y = blockIdx.y * TILE_DIM + threadIdx.y;

@@ -8,11 +8,16 @@ endif
 
 LIBRARIES := -lcublas
 
+TARGET_DIR := ./bin
+
+TARGETS := $(TARGETS:%=$(TARGET_DIR)/%)
+
 NVCC := nvcc
 
 all: $(TARGETS)
 
-%: %.cu
+$(TARGET_DIR)/%: %.cu
+	mkdir -p $(TARGET_DIR)
 	$(NVCC) $(CUDAFLAGS) $(LIBRARIES) $^ -o $@
 
 .PHONY: lint clean
@@ -21,4 +26,4 @@ lint:
 	clang-format -i *.cu *.h
 
 clean:
-	rm -rf $(TARGETS)
+	rm -rf $(TARGET_DIR)
