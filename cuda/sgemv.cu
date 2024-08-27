@@ -4,6 +4,7 @@
 
 #include "common.h"
 
+template <int block_size>
 __global__ void sgemv_cuda_kernel(const float *__restrict__ A, const float *__restrict__ x, float *__restrict__ y,
                                   int M, int N) {
     float4 sum4 = make_float4(0.f, 0.f, 0.f, 0.f);
@@ -18,7 +19,7 @@ __global__ void sgemv_cuda_kernel(const float *__restrict__ A, const float *__re
     }
 
     float sum = (sum4.x + sum4.y) + (sum4.z + sum4.w);
-    sum = block_reduce_sum(sum);
+    sum = block_reduce_sum<block_size, false>(sum);
 
     if (threadIdx.x == 0) {
         y[blockIdx.x] = sum;
@@ -26,9 +27,9 @@ __global__ void sgemv_cuda_kernel(const float *__restrict__ A, const float *__re
 }
 
 static inline void sgemv_cuda(const float *A, const float *x, float *y, int M, int N) {
-    constexpr int num_threads = 1024;
+    constexpr int num_threads = 512;
     const int num_blocks = M;
-    sgemv_cuda_kernel<<<num_blocks, num_threads>>>(A, x, y, M, N);
+    sgemv_cuda_kernel<num_threads><<<num_blocks, num_threads>>>(A, x, y, M, N);
 }
 
 static inline void sgemv_cublas(cublasHandle_t handle, const float *A, const float *x, float *y, int M, int N) {

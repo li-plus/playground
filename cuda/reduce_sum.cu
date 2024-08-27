@@ -1,5 +1,6 @@
 #include "common.h"
 
+template <int block_size>
 __global__ void sum_cuda_kernel(const float *__restrict__ input, float *__restrict__ output,
                                 float *__restrict__ reduce_buffer, int *__restrict__ semaphore, int N) {
     float4 sum4 = make_float4(0.f, 0.f, 0.f, 0.f);
@@ -8,7 +9,7 @@ __global__ void sum_cuda_kernel(const float *__restrict__ input, float *__restri
         sum4 = make_float4(sum4.x + v.x, sum4.y + v.y, sum4.z + v.z, sum4.w + v.w);
     }
     float sum = (sum4.x + sum4.y) + (sum4.z + sum4.w);
-    sum = block_reduce_sum(sum);
+    sum = block_reduce_sum<block_size, false>(sum);
 
     __shared__ bool is_last_block_done_shared;
 
@@ -25,7 +26,7 @@ __global__ void sum_cuda_kernel(const float *__restrict__ input, float *__restri
         for (int i = threadIdx.x; i < gridDim.x; i += blockDim.x) {
             sum += reduce_buffer[i];
         }
-        sum = block_reduce_sum(sum);
+        sum = block_reduce_sum<block_size, false>(sum);
 
         if (threadIdx.x == 0) {
             *output = sum;
@@ -33,11 +34,11 @@ __global__ void sum_cuda_kernel(const float *__restrict__ input, float *__restri
     }
 }
 
-static void sum_cuda(const float *input, float *output, float *reduce_buffer, int *semaphore, int N, int num_blocks,
-                     int num_threads) {
+template <int block_size>
+static void sum_cuda(const float *input, float *output, float *reduce_buffer, int *semaphore, int N, int num_blocks) {
     CHECK(N % 4 == 0);
     CHECK_CUDA(cudaMemsetAsync(semaphore, 0, sizeof(int)));
-    sum_cuda_kernel<<<num_blocks, num_threads>>>(input, output, reduce_buffer, semaphore, N);
+    sum_cuda_kernel<block_size><<<num_blocks, block_size>>>(input, output, reduce_buffer, semaphore, N);
 }
 
 static float sum_cpu(const float *input, int N) {
@@ -72,7 +73,7 @@ int main() {
 
     CHECK_CUDA(cudaMemcpy(d_input, h_input, N * sizeof(float), cudaMemcpyHostToDevice));
 
-    sum_cuda(d_input, d_output, d_reduce_buffer, d_semaphore, N, num_blocks, num_threads);
+    sum_cuda<num_threads>(d_input, d_output, d_reduce_buffer, d_semaphore, N, num_blocks);
     CHECK_CUDA(cudaMemcpy(&h_output, d_output, sizeof(float), cudaMemcpyDeviceToHost));
 
     // check diff
@@ -80,7 +81,7 @@ int main() {
 
     // benchmark
     const float elapsed =
-        timeit([=] { sum_cuda(d_input, d_output, d_reduce_buffer, d_semaphore, N, num_blocks, num_threads); }, 2, 10);
+        timeit([=] { sum_cuda<num_threads>(d_input, d_output, d_reduce_buffer, d_semaphore, N, num_blocks); }, 2, 10);
     const float bandwidth = N * sizeof(float) / 1e9 / elapsed;
     printf("[reduce_sum] elapsed %.3f us, bandwidth %.3f GB/s\n", elapsed * 1e6, bandwidth);
 

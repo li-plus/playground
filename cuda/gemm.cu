@@ -789,7 +789,7 @@ void perf(int M, int N, int K) {
 
     struct PerfRecord {
         std::string name;
-        float elapsed_ms = INFINITY;
+        float elapsed = INFINITY;
     };
 
     PerfRecord best_record;
@@ -831,25 +831,19 @@ void perf(int M, int N, int K) {
             auto perf_fn = [=] { fn(M, N, K, dA, dB, dC1); };
             const int warmup = std::max(4096 / M, 1);
             const int active = warmup * 4;
-            const float elapsed_ms = timeit(perf_fn, warmup, active);
+            const float elapsed = timeit(perf_fn, warmup, active);
 
-            const float tflops_peak = V100SXM2Spec::PEAK_FP32_TFLOPS;
-            const float tflops_actual = (2ull * M * N * K) / elapsed_ms / 1e9;
-            const float mfu = tflops_actual / tflops_peak;
+            const float tflops = (2ull * M * N * K) / 1e12f / elapsed;
+            const float bandwidth = (M * K + K * N + M * N) * sizeof(float) / 1e9f / elapsed;
 
-            const float bw_peak = V100SXM2Spec::PEAK_MEM_BW;
-            const float bw_actual = (M * K + K * N + M * N) * sizeof(float) / 1e9 / (elapsed_ms / 1e3);
-            const float mbu = bw_actual / bw_peak;
-
-            printf("[%s] elapsed %.3f ms, mfu %.3f (%.1f/%.1f TFLOPS), mbu %.3f (%.1f/%.1f GB/s)\n", name.c_str(),
-                   elapsed_ms, mfu, tflops_actual, tflops_peak, mbu, bw_actual, bw_peak);
+            printf("[%s] elapsed %.3f us, %.1f TFLOPS, %.3f GB/s\n", name.c_str(), elapsed * 1e6, tflops, bandwidth);
 
             if (name == "cublas") {
                 cublas_record.name = name;
-                cublas_record.elapsed_ms = elapsed_ms;
-            } else if (elapsed_ms < best_record.elapsed_ms) {
+                cublas_record.elapsed = elapsed;
+            } else if (elapsed < best_record.elapsed) {
                 best_record.name = name;
-                best_record.elapsed_ms = elapsed_ms;
+                best_record.elapsed = elapsed;
             }
         }
 
@@ -860,7 +854,8 @@ void perf(int M, int N, int K) {
     }
 
     printf("[best] %s vs cublas: %.1f%% (%.3f vs %.3f ms)\n", best_record.name.c_str(),
-           cublas_record.elapsed_ms / best_record.elapsed_ms * 100.f, best_record.elapsed_ms, cublas_record.elapsed_ms);
+           cublas_record.elapsed / best_record.elapsed * 100.f, best_record.elapsed * 1e3f,
+           cublas_record.elapsed * 1e3f);
 
     CHECK_CUBLAS(cublasDestroy(handle));
 

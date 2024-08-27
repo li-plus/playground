@@ -85,26 +85,32 @@ static inline void check_is_close(const half *a, const half *b, size_t n, float 
 
 static inline int ceil_div(int a, int b) { return (a + b - 1) / b; }
 
+static constexpr int WARP_SIZE = 32;
+
+template <int warp_size = 32>
 __device__ __forceinline__ float warp_reduce_sum(float v) {
 #pragma unroll
-    for (int mask = 16; mask > 0; mask >>= 1) {
-        v += __shfl_xor_sync(0xffffffff, v, mask, warpSize);
+    for (int mask = warp_size / 2; mask > 0; mask >>= 1) {
+        v += __shfl_xor_sync(0xffffffff, v, mask, WARP_SIZE);
     }
     return v;
 }
 
+template <int block_size, bool all>
 __device__ __forceinline__ float block_reduce_sum(float v) {
+    static_assert(block_size % WARP_SIZE == 0, "invalid block size");
     v = warp_reduce_sum(v);
-    if (blockDim.x > warpSize) {
-        __shared__ float shm[32];
-        const int num_warps = blockDim.x / warpSize;
-        const int warp_id = threadIdx.x / warpSize;
-        const int lane_id = threadIdx.x % warpSize;
+    constexpr int num_warps = block_size / WARP_SIZE;
+    if constexpr (num_warps > 1) {
+        __shared__ float shm[num_warps];
+        const int warp_id = threadIdx.x / WARP_SIZE;
+        const int lane_id = threadIdx.x % WARP_SIZE;
         if (lane_id == 0) {
             shm[warp_id] = v;
         }
         __syncthreads();
-        v = warp_reduce_sum((lane_id < num_warps) ? shm[lane_id] : 0.f);
+        constexpr int warp_reduce_size = all ? (1024 / WARP_SIZE) : num_warps;
+        v = warp_reduce_sum<warp_reduce_size>((lane_id < num_warps) ? shm[lane_id] : 0.f);
     }
     return v;
 }

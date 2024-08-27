@@ -4,6 +4,7 @@
 
 #include "common.h"
 
+template <int block_size>
 __global__ void hgemv_cuda_kernel(const half *__restrict__ A, const half *__restrict__ x, half *__restrict__ y, int M,
                                   int N) {
     float sum = 0.f;
@@ -19,7 +20,7 @@ __global__ void hgemv_cuda_kernel(const half *__restrict__ A, const half *__rest
         }
     }
 
-    sum = block_reduce_sum(sum);
+    sum = block_reduce_sum<block_size, false>(sum);
 
     if (threadIdx.x == 0) {
         y[blockIdx.x] = sum;
@@ -29,7 +30,7 @@ __global__ void hgemv_cuda_kernel(const half *__restrict__ A, const half *__rest
 static inline void hgemv_cuda(const half *A, const half *x, half *y, int M, int N) {
     constexpr int num_threads = 512;
     const int num_blocks = M;
-    hgemv_cuda_kernel<<<num_blocks, num_threads>>>(A, x, y, M, N);
+    hgemv_cuda_kernel<num_threads><<<num_blocks, num_threads>>>(A, x, y, M, N);
 }
 
 static inline void hgemv_cublas(cublasHandle_t handle, const half *A, const half *x, half *y, int M, int N) {
