@@ -15,7 +15,7 @@ Tested on 8 A100 NVLink GPUs with 600GB/s bi-directional bandwidth (300GB/s TX &
   1073741824     268435456     float     sum      -1   5503.4  195.10  195.10      0   5490.5  195.56  195.56    N/A
 ```
 
-Note that 195GB/s is uni-directional, meaning that one GPU can simultaneously send and receive 195GB data within one second.
+Note that 195GB/s is uni-directional, meaning that one GPU can simultaneously send and receive 195GB data within one second. Only focus on the traffic sent or received for uni-directional bandwidth!
 
 Performance explanation: https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md
 
