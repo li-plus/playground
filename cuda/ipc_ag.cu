@@ -28,18 +28,13 @@ static inline __device__ uint32_t ld_flag_acquire(uint32_t *flag_addr) {
 }
 
 __global__ void ipc_all_gather_kernel(const int *__restrict__ input, int **__restrict__ peers_output,
-                                      uint32_t **__restrict__ flag, int rank, int world_size, int N) {
-    constexpr bool simulate_unbalance = false;
-    if constexpr (simulate_unbalance) {
-        volatile clock_t start_clock = clock();
-        volatile clock_t clock_offset = 0;
-        while (clock_offset < rank * 1'000'000'000ull) {
-            clock_offset = clock() - start_clock;
-        }
-        if (threadIdx.x + blockIdx.x + blockIdx.y == 0) {
-            printf("[rank %d] kernel start\n", rank);
-        }
-    }
+                                      uint32_t **__restrict__ peers_flag, uint32_t flag_value, int rank, int world_size,
+                                      int N) {
+    // flag: [world_size, world_size]
+
+    uint32_t *local_flag = peers_flag[rank];
+
+    constexpr bool simulate_unbalance = true;
 
     const int peer_rank = (blockIdx.y + rank) % world_size;
     int *peer_output = peers_output[peer_rank] + rank * N;
@@ -47,26 +42,28 @@ __global__ void ipc_all_gather_kernel(const int *__restrict__ input, int **__res
         *(float4 *)&peer_output[i] = *(float4 *)&input[i];
     }
 
-    __shared__ int prev_blocks;
+    __shared__ int prev_flag;
     if (threadIdx.x == 0) {
-        prev_blocks = atomicAdd(flag[rank], 1);
+        prev_flag = atomicAdd(local_flag + rank, 1);
     }
     __syncthreads();
 
-    if (prev_blocks == gridDim.y * gridDim.x - 1) {
+    if (prev_flag == flag_value - 1) {
         if (threadIdx.x < world_size) {
-            uint32_t *peer_flag = flag[threadIdx.x];
-            while (ld_flag_acquire(peer_flag) != gridDim.y * gridDim.x) {
+            st_flag_release(flag_value, peers_flag[threadIdx.x] + rank);
+
+            while (ld_flag_acquire(local_flag + threadIdx.x) != flag_value) {
             }
         }
     }
 }
 
-void ipc_all_gather_cuda(const int *input, int **peers_output, uint32_t **peers_flag, int rank, int world_size, int N) {
-    constexpr int block_size = 32;
+void ipc_all_gather_cuda(const int *input, int **peers_output, uint32_t **peers_flag, uint32_t *flag, int run_count,
+                         int rank, int world_size, int N) {
+    constexpr int block_size = 128;
     const dim3 grid_size((N / 4 + block_size - 1) / block_size, world_size);
-    ipc_all_gather_kernel<<<grid_size, block_size>>>(input, peers_output, peers_flag, rank, world_size, N);
-    CHECK_CUDA(cudaGetLastError());
+    uint32_t flag_value = (run_count + 1) * grid_size.x * grid_size.y;
+    ipc_all_gather_kernel<<<grid_size, block_size>>>(input, peers_output, peers_flag, flag_value, rank, world_size, N);
 }
 
 int main(int argc, char **argv) {
@@ -80,7 +77,7 @@ int main(int argc, char **argv) {
 
     CHECK_CUDA(cudaSetDevice(rank));
 
-    const int N = 1024 * 1024;
+    const int N = 2 * 1024 * 1024;
 
     int *h_output;
     CHECK_CUDA(cudaMallocHost(&h_output, world_size * N * sizeof(int)));
@@ -89,11 +86,12 @@ int main(int argc, char **argv) {
     CHECK_CUDA(cudaMalloc(&d_input, N * sizeof(int)));
     CHECK_CUDA(cudaMemset(d_input, rank, N * sizeof(int)));
 
-    std::vector<void *> d_output_h_vec(world_size);
+    std::vector<int *> d_output_h_vec(world_size);
     CHECK_CUDA(cudaMalloc(&d_output_h_vec[rank], world_size * N * sizeof(int)));
 
-    std::vector<void *> d_flag_h_vec(world_size);
-    CHECK_CUDA(cudaMalloc(&d_flag_h_vec[rank], sizeof(uint32_t)));
+    std::vector<uint32_t *> d_flag_h_vec(world_size);
+    CHECK_CUDA(cudaMalloc(&d_flag_h_vec[rank], world_size * sizeof(uint32_t)));
+    CHECK_CUDA(cudaMemset(d_flag_h_vec[rank], 0, world_size * sizeof(uint32_t)));
 
     // ipc mem
     std::vector<cudaIpcMemHandle_t> mem_handles(world_size);
@@ -102,10 +100,11 @@ int main(int argc, char **argv) {
                   sizeof(cudaIpcMemHandle_t), MPI_BYTE, MPI_COMM_WORLD);
     for (int i = 0; i < world_size; i++) {
         if (i != rank) {
-            CHECK_CUDA(cudaIpcOpenMemHandle(&d_output_h_vec[i], mem_handles[i], cudaIpcMemLazyEnablePeerAccess));
+            CHECK_CUDA(
+                cudaIpcOpenMemHandle((void **)&d_output_h_vec[i], mem_handles[i], cudaIpcMemLazyEnablePeerAccess));
         }
     }
-    void **d_output_d_vec;
+    int **d_output_d_vec;
     CHECK_CUDA(cudaMalloc(&d_output_d_vec, world_size * sizeof(void *)));
     CHECK_CUDA(
         cudaMemcpyAsync(d_output_d_vec, d_output_h_vec.data(), world_size * sizeof(void *), cudaMemcpyHostToDevice));
@@ -115,16 +114,30 @@ int main(int argc, char **argv) {
                   sizeof(cudaIpcMemHandle_t), MPI_BYTE, MPI_COMM_WORLD);
     for (int i = 0; i < world_size; i++) {
         if (i != rank) {
-            CHECK_CUDA(cudaIpcOpenMemHandle(&d_flag_h_vec[i], mem_handles[i], cudaIpcMemLazyEnablePeerAccess));
+            CHECK_CUDA(cudaIpcOpenMemHandle((void **)&d_flag_h_vec[i], mem_handles[i], cudaIpcMemLazyEnablePeerAccess));
         }
     }
-    void **d_flag_d_vec;
+    uint32_t **d_flag_d_vec;
     CHECK_CUDA(cudaMalloc(&d_flag_d_vec, world_size * sizeof(void *)));
     CHECK_CUDA(cudaMemcpyAsync(d_flag_d_vec, d_flag_h_vec.data(), world_size * sizeof(void *), cudaMemcpyHostToDevice));
 
+    // ipc events
+    // std::vector<cudaEvent_t> events(world_size);
+    // std::vector<cudaIpcEventHandle_t> event_handles(world_size);
+    // CHECK_CUDA(cudaEventCreate(&events[rank], cudaEventDisableTiming | cudaEventInterprocess));
+    // CHECK_CUDA(cudaIpcGetEventHandle(&event_handles[rank], events[rank]));
+    // MPI_Allgather(event_handles.data() + rank, sizeof(cudaIpcEventHandle_t), MPI_BYTE, event_handles.data(),
+    //               sizeof(cudaIpcEventHandle_t), MPI_BYTE, MPI_COMM_WORLD);
+    // for (int i = 0; i < world_size; i++) {
+    //     if (i != rank) {
+    //         CHECK_CUDA(cudaIpcOpenEventHandle(&events[i], event_handles[i]));
+    //     }
+    // }
+
+    int run_count = 0;
+
     // run & check
-    CHECK_CUDA(cudaMemsetAsync(d_flag_h_vec[rank], 0, sizeof(uint32_t)));
-    ipc_all_gather_cuda(d_input, (int **)d_output_d_vec, (uint32_t **)d_flag_d_vec, rank, world_size, N);
+    ipc_all_gather_cuda(d_input, d_output_d_vec, d_flag_d_vec, d_flag_h_vec[rank], run_count++, rank, world_size, N);
     CHECK_CUDA(cudaMemcpy(h_output, d_output_h_vec[rank], world_size * N * sizeof(int), cudaMemcpyDeviceToHost));
 
     int *h_output_ref;
@@ -137,12 +150,15 @@ int main(int argc, char **argv) {
     // benchmark
     const float elapsed = timeit(
         [&] {
-            CHECK_CUDA(cudaMemsetAsync(d_flag_h_vec[rank], 0, sizeof(uint32_t)));
-            ipc_all_gather_cuda(d_input, (int **)d_output_d_vec, (uint32_t **)d_flag_d_vec, rank, world_size, N);
+            ipc_all_gather_cuda(d_input, d_output_d_vec, d_flag_d_vec, d_flag_h_vec[rank], run_count++, rank,
+                                world_size, N);
         },
-        10, 100);
+        10, 1000);
     const float bus_bandwidth = (world_size - 1) * N * sizeof(int) / 1e9f / elapsed;
-    printf("[cuda] elapsed %.3f us, (uni-directional) bus_bandwidth %.3f GB/s\n", elapsed * 1e6f, bus_bandwidth);
+    printf("[rank %d] [cuda] elapsed %.3f us, (uni-directional) bus_bandwidth %.3f GB/s\n", rank, elapsed * 1e6f,
+           bus_bandwidth);
+
+    MPI_Barrier(MPI_COMM_WORLD);
 
     // clean up
     for (int i = 0; i < world_size; i++) {
