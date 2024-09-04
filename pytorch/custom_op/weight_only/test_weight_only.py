@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
-from torch.utils.benchmark import Timer
-
 import weight_only
+from torch.utils.benchmark import Timer
 
 
 def quantize_8bit(weight: torch.Tensor, scales: torch.Tensor, group_size: int) -> torch.Tensor:

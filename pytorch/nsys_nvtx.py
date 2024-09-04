@@ -7,7 +7,7 @@ import torch
 from torchvision.models import resnet50
 
 model = resnet50().cuda().eval()
-x = torch.randn(2, 3, 1024, 1024, device='cuda')
+x = torch.randn(2, 3, 1024, 1024, device="cuda")
 
 for _ in range(10):
     with torch.cuda.nvtx.range("forward"):

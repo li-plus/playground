@@ -94,5 +94,14 @@ https://docs.nvidia.com/gameworks/content/developertools/desktop/analysis/report
 
 Use Nsight Compute to calculate theoretical max occupancy.
 
+# TensorRT-LLM
 
+Follow instructions of the [LLaMA example](https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/llama).
 
+For half precision, cublas gemm kernel is used for context. [cudaCoreGemm](https://github.com/NVIDIA/TensorRT-LLM/blob/main/cpp/tensorrt_llm/kernels/weightOnlyBatchedGemv/cudaCoreGemm.cu) kernel is used to compute GEMV for decoding.
+
+For `tp_size > 1`, [oneShotAllReduceKernel](https://github.com/NVIDIA/TensorRT-LLM/blob/main/cpp/tensorrt_llm/kernels/customAllReduceKernels.cu) is used for communication by default. Also supports NCCL strategy.
+
+For weight only quantization, `GemmFpAIntB` is used for context. Custom [gemv kernel](https://github.com/NVIDIA/TensorRT-LLM/blob/main/cpp/tensorrt_llm/kernels/weightOnlyBatchedGemv/kernel.h) is used for decoing.
+
+Sadly, batch manager & executor modules are not open source.
