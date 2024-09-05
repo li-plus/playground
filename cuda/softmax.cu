@@ -30,11 +30,11 @@ __global__ void softmax_kernel(const float *input, float *output, int N) {
     }
 }
 
-void softmax_cuda(const float *input, float *output, int M, int N) {
+cudaError_t softmax_cuda(const float *input, float *output, int M, int N) {
     constexpr int block_size = 256;
     const int grid_size = M;
     softmax_kernel<block_size><<<grid_size, block_size>>>(input, output, N);
-    CHECK_CUDA(cudaGetLastError());
+    return cudaGetLastError();
 }
 
 int main() {
@@ -69,15 +69,15 @@ int main() {
 
     // cuda
     CHECK_CUDA(cudaMemsetAsync(d_y, 0, M * N * sizeof(float)));
-    softmax_cuda(d_x, d_y, M, N);
+    CHECK_CUDA(softmax_cuda(d_x, d_y, M, N));
     CHECK_CUDA(cudaMemcpy(h_y_cuda, d_y, M * N * sizeof(float), cudaMemcpyDeviceToHost));
 
     // cudnn
     const float alpha = 1.f;
     const float beta = 0.f;
     CHECK_CUDA(cudaMemsetAsync(d_y, 0, M * N * sizeof(float)));
-    cudnnSoftmaxForward(handle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_CHANNEL, &alpha, x_desc, d_x, &beta, y_desc,
-                        d_y);
+    CHECK_CUDNN(cudnnSoftmaxForward(handle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_CHANNEL, &alpha, x_desc, d_x,
+                                    &beta, y_desc, d_y));
     CHECK_CUDA(cudaMemcpy(h_y_cudnn, d_y, M * N * sizeof(float), cudaMemcpyDeviceToHost));
 
     check_is_close(h_y_cuda, h_y_cudnn, M * N, 1e-4f);
@@ -90,8 +90,8 @@ int main() {
     {
         const float elapsed = timeit(
             [&] {
-                cudnnSoftmaxForward(handle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_CHANNEL, &alpha, x_desc, d_x,
-                                    &beta, y_desc, d_y);
+                CHECK_CUDNN(cudnnSoftmaxForward(handle, CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_CHANNEL, &alpha,
+                                                x_desc, d_x, &beta, y_desc, d_y));
             },
             10, 100);
         printf("[cudnn] elapsed %.3f us\n", elapsed * 1e6);
