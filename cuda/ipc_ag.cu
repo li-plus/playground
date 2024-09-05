@@ -34,8 +34,6 @@ __global__ void ipc_all_gather_kernel(const int *__restrict__ input, int **__res
 
     uint32_t *local_flag = peers_flag[rank];
 
-    constexpr bool simulate_unbalance = true;
-
     const int peer_rank = (blockIdx.y + rank) % world_size;
     int *peer_output = peers_output[peer_rank] + rank * N;
     for (int i = 4 * (blockIdx.x * blockDim.x + threadIdx.x); i < N; i += 4 * gridDim.x * blockDim.x) {

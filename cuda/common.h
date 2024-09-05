@@ -20,25 +20,18 @@ class LogMessageFatal {
     if (!(cond))                                                                                                       \
     THROW << "check failed (" #cond ") "
 
-#define CHECK_CUDA(status) check_cuda_status((status), __FILE__, __LINE__)
+#define CHECK_CUDA(call)                                                                                               \
+    do {                                                                                                               \
+        cudaError_t status = (call);                                                                                   \
+        CHECK(status == cudaSuccess) << "cuda error: " << cudaGetErrorString(status);                                  \
+    } while (false)
 
-static inline void check_cuda_status(cudaError_t status, const char *file, int line) {
-    if (status != cudaSuccess) {
-        fprintf(stderr, "%s:%d: cuda error: %s\n", file, line, cudaGetErrorString(status));
-        cudaDeviceReset();
-        exit(EXIT_FAILURE);
-    }
-}
-
-#define CHECK_CUBLAS(status) check_cublas_status((status), __FILE__, __LINE__)
-
-static inline void check_cublas_status(cublasStatus_t status, const char *file, int line) {
-    if (status != CUBLAS_STATUS_SUCCESS) {
-        fprintf(stderr, "%s:%d: cublas error code: %d\n", file, line, status);
-        cudaDeviceReset();
-        exit(EXIT_FAILURE);
-    }
-}
+#define CHECK_CUBLAS(call)                                                                                             \
+    do {                                                                                                               \
+        cublasStatus_t status = (call);                                                                                \
+        CHECK(status == CUBLAS_STATUS_SUCCESS)                                                                         \
+            << "cublas error: [" << cublasGetStatusName(status) << "] " << cublasGetStatusString(status);              \
+    } while (false)
 
 static inline float uniform() { return rand() / (float)RAND_MAX; }
 
