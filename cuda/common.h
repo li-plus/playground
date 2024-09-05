@@ -114,3 +114,31 @@ __device__ __forceinline__ float block_reduce_sum(float v) {
     }
     return v;
 }
+
+template <int warp_size = 32>
+__device__ __forceinline__ float warp_reduce_max(float v) {
+#pragma unroll
+    for (int mask = warp_size / 2; mask > 0; mask >>= 1) {
+        v = fmaxf(v, __shfl_xor_sync(0xffffffff, v, mask, 32));
+    }
+    return v;
+}
+
+template <int block_size, bool all>
+__device__ __forceinline__ float block_reduce_max(float v) {
+    static_assert(block_size % WARP_SIZE == 0, "invalid block size");
+    v = warp_reduce_max(v);
+    constexpr int num_warps = block_size / WARP_SIZE;
+    if constexpr (num_warps > 1) {
+        __shared__ float shm[num_warps];
+        const int warp_id = threadIdx.x / WARP_SIZE;
+        const int lane_id = threadIdx.x % WARP_SIZE;
+        if (lane_id == 0) {
+            shm[warp_id] = v;
+        }
+        __syncthreads();
+        constexpr int warp_reduce_size = all ? (1024 / WARP_SIZE) : num_warps;
+        v = warp_reduce_max<warp_reduce_size>((lane_id < num_warps) ? shm[lane_id] : -INFINITY);
+    }
+    return v;
+}

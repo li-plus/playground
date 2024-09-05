@@ -1,4 +1,4 @@
-TARGETS := noop fuse memcpy reduce_sum float4 sgemv hgemv sched coalesce transpose loop cache ipc_ag
+TARGETS := noop fuse memcpy reduce_sum float4 sgemv hgemv sched coalesce transpose loop cache ipc_ag softmax
 
 CUDAFLAGS := -std=c++17 -gencode arch=compute_80,code=sm_80 -O3 -lineinfo
 
@@ -8,7 +8,7 @@ endif
 
 INCLUDES := -I/usr/include/x86_64-linux-gnu/mpi
 
-LIBRARIES := -lcublas -lmpi
+LIBRARIES := -lcublas -lcudnn -lmpi
 
 TARGET_DIR := ./build
 
