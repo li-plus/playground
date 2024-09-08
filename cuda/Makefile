@@ -1,4 +1,4 @@
-TARGETS := noop fuse memcpy reduce_sum float4 sgemv hgemv sched coalesce transpose loop cache ipc_ag softmax
+TARGETS := noop fuse memcpy reduce_sum reduce_sum_dim float4 sgemv hgemv sched coalesce transpose loop cache ipc_ag softmax
 
 CUDAFLAGS := -std=c++17 -gencode arch=compute_80,code=sm_80 -O3 -lineinfo
 
@@ -18,11 +18,9 @@ NVCC := nvcc
 
 all: $(TARGETS)
 
-$(TARGET_DIR):
-	mkdir -p $@
-
-$(TARGET_DIR)/%: %.cu $(TARGET_DIR)
-	$(NVCC) $(CUDAFLAGS) $(INCLUDES) $(LIBRARIES) $< -o $@
+$(TARGET_DIR)/%: %.cu
+	mkdir -p $(TARGET_DIR)
+	$(NVCC) $(CUDAFLAGS) $(INCLUDES) $(LIBRARIES) $^ -o $@
 
 .PHONY: lint clean
 

@@ -166,9 +166,9 @@ int main() {
     constexpr size_t N = 4096;
 
     float *h_input, *h_output_ref, *h_output_out;
-    CHECK_CUDA(cudaHostAlloc(&h_input, M * N * sizeof(float), cudaHostAllocDefault));
-    CHECK_CUDA(cudaHostAlloc(&h_output_ref, N * M * sizeof(float), cudaHostAllocDefault));
-    CHECK_CUDA(cudaHostAlloc(&h_output_out, N * M * sizeof(float), cudaHostAllocDefault));
+    CHECK_CUDA(cudaMallocHost(&h_input, M * N * sizeof(float), cudaHostAllocDefault));
+    CHECK_CUDA(cudaMallocHost(&h_output_ref, N * M * sizeof(float), cudaHostAllocDefault));
+    CHECK_CUDA(cudaMallocHost(&h_output_out, N * M * sizeof(float), cudaHostAllocDefault));
 
     float *d_input, *d_output;
     CHECK_CUDA(cudaMalloc(&d_input, M * N * sizeof(float)));

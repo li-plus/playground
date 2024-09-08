@@ -102,8 +102,8 @@ void test(size_t N) {
     printf("===== N = %zu =====\n", N);
 
     char *h_a, *h_b;
-    CHECK_CUDA(cudaHostAlloc(&h_a, N, cudaHostAllocDefault));
-    CHECK_CUDA(cudaHostAlloc(&h_b, N, cudaHostAllocDefault));
+    CHECK_CUDA(cudaMallocHost(&h_a, N, cudaHostAllocDefault));
+    CHECK_CUDA(cudaMallocHost(&h_b, N, cudaHostAllocDefault));
 
     char *d_a, *d_b;
     CHECK_CUDA(cudaMalloc(&d_a, N));

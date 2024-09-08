@@ -55,7 +55,7 @@ int main() {
     constexpr int num_blocks = (N + num_threads - 1) / num_threads / 32;
 
     float *h_input;
-    CHECK_CUDA(cudaHostAlloc(&h_input, N * sizeof(float), cudaHostAllocDefault));
+    CHECK_CUDA(cudaMallocHost(&h_input, N * sizeof(float), cudaHostAllocDefault));
 
     float *d_input, *d_output, *d_reduce_buffer;
     int *d_semaphore;

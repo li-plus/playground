@@ -28,10 +28,10 @@ int main() {
     constexpr size_t N = 128ull * 1024 * 1024;
 
     float *h_input, *h_other, *h_output_f1, *h_output_f4;
-    CHECK_CUDA(cudaHostAlloc(&h_input, N * sizeof(float), cudaHostAllocDefault));
-    CHECK_CUDA(cudaHostAlloc(&h_other, N * sizeof(float), cudaHostAllocDefault));
-    CHECK_CUDA(cudaHostAlloc(&h_output_f1, N * sizeof(float), cudaHostAllocDefault));
-    CHECK_CUDA(cudaHostAlloc(&h_output_f4, N * sizeof(float), cudaHostAllocDefault));
+    CHECK_CUDA(cudaMallocHost(&h_input, N * sizeof(float), cudaHostAllocDefault));
+    CHECK_CUDA(cudaMallocHost(&h_other, N * sizeof(float), cudaHostAllocDefault));
+    CHECK_CUDA(cudaMallocHost(&h_output_f1, N * sizeof(float), cudaHostAllocDefault));
+    CHECK_CUDA(cudaMallocHost(&h_output_f4, N * sizeof(float), cudaHostAllocDefault));
 
     float *d_input, *d_other, *d_output_f1, *d_output_f4;
     CHECK_CUDA(cudaMalloc(&d_input, N * sizeof(float)));

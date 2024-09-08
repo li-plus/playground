@@ -46,10 +46,10 @@ int main() {
     CHECK_CUBLAS(cublasCreate(&cublas_handle));
 
     float *h_A, *h_x, *h_y, *h_y_ref;
-    CHECK_CUDA(cudaHostAlloc(&h_A, M * N * sizeof(float), cudaHostAllocDefault));
-    CHECK_CUDA(cudaHostAlloc(&h_x, N * sizeof(float), cudaHostAllocDefault));
-    CHECK_CUDA(cudaHostAlloc(&h_y, M * sizeof(float), cudaHostAllocDefault));
-    CHECK_CUDA(cudaHostAlloc(&h_y_ref, M * sizeof(float), cudaHostAllocDefault));
+    CHECK_CUDA(cudaMallocHost(&h_A, M * N * sizeof(float), cudaHostAllocDefault));
+    CHECK_CUDA(cudaMallocHost(&h_x, N * sizeof(float), cudaHostAllocDefault));
+    CHECK_CUDA(cudaMallocHost(&h_y, M * sizeof(float), cudaHostAllocDefault));
+    CHECK_CUDA(cudaMallocHost(&h_y_ref, M * sizeof(float), cudaHostAllocDefault));
 
     float *d_A, *d_x, *d_y, *d_y_ref;
     CHECK_CUDA(cudaMalloc(&d_A, M * N * sizeof(float)));
