@@ -2,13 +2,20 @@ TARGETS := finite init move optional avx float asm
 
 CXXFLAGS := -std=c++17 -mavx -O2
 
+TARGET_DIR := ./build
+
+TARGETS := $(TARGETS:%=$(TARGET_DIR)/%)
+
 all: $(TARGETS)
 
-%: %.cpp
-	$(CXX) $(CXXFLAGS) $^ -o $@
+$(TARGET_DIR):
+	mkdir -p $@
 
-%.s: %.cpp
-	$(CXX) $(CXXFLAGS) -S $^ -o $@
+$(TARGET_DIR)/%: %.cpp $(TARGET_DIR)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+$(TARGET_DIR)/%.s: %.cpp $(TARGET_DIR)
+	$(CXX) $(CXXFLAGS) -S $< -o $@
 
 .PHONY: lint clean
 
@@ -16,4 +23,4 @@ lint:
 	clang-format -i *.cpp
 
 clean:
-	rm -rf $(TARGETS)
+	rm -rf $(TARGET_DIR)

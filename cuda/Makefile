@@ -18,9 +18,11 @@ NVCC := nvcc
 
 all: $(TARGETS)
 
-$(TARGET_DIR)/%: %.cu
-	mkdir -p $(TARGET_DIR)
-	$(NVCC) $(CUDAFLAGS) $(INCLUDES) $(LIBRARIES) $^ -o $@
+$(TARGET_DIR):
+	mkdir -p $@
+
+$(TARGET_DIR)/%: %.cu $(TARGET_DIR)
+	$(NVCC) $(CUDAFLAGS) $(INCLUDES) $(LIBRARIES) $< -o $@
 
 .PHONY: lint clean
 
