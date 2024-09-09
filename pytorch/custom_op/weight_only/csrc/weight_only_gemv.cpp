@@ -16,14 +16,14 @@ torch::Tensor gemv_w8(torch::Tensor input, torch::Tensor weight, torch::Tensor s
     const int M = weight.size(0);
     const int N = weight.size(-1);
 
+    TORCH_INTERNAL_ASSERT(input.is_cuda() && weight.is_cuda() && scales.is_cuda() && bias.is_cuda());
+
     constexpr int group_size = 128;
-    TORCH_CHECK(input.is_cuda() && input.is_contiguous() && input.numel() == N);
-    TORCH_CHECK(weight.is_cuda() && weight.is_contiguous() && weight.numel() == M * N && N % 16 == 0 &&
-                weight.dtype() == torch::kUInt8);
-    TORCH_CHECK(scales.is_cuda() && scales.is_contiguous() && scales.numel() * group_size == weight.numel() &&
+    TORCH_CHECK(input.is_contiguous() && input.numel() == N);
+    TORCH_CHECK(weight.is_contiguous() && weight.numel() == M * N && N % 16 == 0 && weight.dtype() == torch::kUInt8);
+    TORCH_CHECK(scales.is_contiguous() && scales.numel() * group_size == weight.numel() &&
                 scales.dtype() == input.dtype());
-    TORCH_CHECK(bias.is_cuda() && bias.is_contiguous() && bias.ndimension() == 1 && bias.numel() == M &&
-                bias.dtype() == input.dtype());
+    TORCH_CHECK(bias.is_contiguous() && bias.ndimension() == 1 && bias.numel() == M && bias.dtype() == input.dtype());
 
     auto output_shape = input.sizes().vec();
     output_shape.back() = M;
@@ -40,4 +40,11 @@ torch::Tensor gemv_w8(torch::Tensor input, torch::Tensor weight, torch::Tensor s
     return output;
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("gemv_w8", &gemv_w8); }
+// Registers _C as a Python extension module.
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {}
+
+// Defines the operators
+TORCH_LIBRARY(weight_only, m) { m.def("gemv_w8(Tensor input, Tensor weight, Tensor scales, Tensor bias) -> Tensor"); }
+
+// Registers CUDA implementations for mymuladd, mymul, myadd_out
+TORCH_LIBRARY_IMPL(weight_only, CUDA, m) { m.impl("gemv_w8", &gemv_w8); }

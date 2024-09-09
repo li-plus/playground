@@ -81,7 +81,7 @@ cudaError_t sum_cg_warp_reduce_cuda(const float *input, float *output, int M, in
 
 int main() {
     constexpr size_t M = 512;
-    constexpr size_t N = 1024;
+    constexpr size_t N = 2048;
 
     float *h_input, *h_output_expect, *h_output_actual;
     CHECK_CUDA(cudaMallocHost(&h_input, M * N * sizeof(float), cudaHostAllocDefault));

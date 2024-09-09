@@ -53,7 +53,7 @@ def test_gemv_w8():
     torch.testing.assert_close(dq_weight, fc.weight.data)
 
     y_ref = fc(x)
-    y_out = weight_only.gemv_w8(x, q_weight, scales, fc.bias.data)
+    y_out = torch.ops.weight_only.gemv_w8(x, q_weight, scales, fc.bias.data)
 
     torch.testing.assert_close(y_out, y_ref, rtol=1e-3, atol=2e-2)
 
@@ -70,7 +70,7 @@ def test_gemv_w8():
 
     elapsed = (
         Timer(
-            "weight_only.gemv_w8(x, q_weight, scales, fc.bias.data)",
+            "torch.ops.weight_only.gemv_w8(x, q_weight, scales, fc.bias.data)",
             globals={**globals(), **locals()},
         )
         .timeit(100)
