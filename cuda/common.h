@@ -1,9 +1,13 @@
 #pragma once
 
+#include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <sstream>
 #include <stdio.h>
+
+namespace cg = cooperative_groups;
 
 class LogMessageFatal {
   public:
@@ -91,7 +95,6 @@ __device__ __forceinline__ float warp_reduce_sum(float v) {
 
 template <int block_size, bool all>
 __device__ __forceinline__ float block_reduce_sum(float v) {
-    static_assert(block_size % WARP_SIZE == 0, "invalid block size");
     v = warp_reduce_sum(v);
     constexpr int num_warps = block_size / WARP_SIZE;
     if constexpr (num_warps > 1) {
@@ -102,8 +105,39 @@ __device__ __forceinline__ float block_reduce_sum(float v) {
             shm[warp_id] = v;
         }
         __syncthreads();
-        constexpr int warp_reduce_size = all ? (1024 / WARP_SIZE) : num_warps;
-        v = warp_reduce_sum<warp_reduce_size>((lane_id < num_warps) ? shm[lane_id] : 0.f);
+        v = warp_reduce_sum<num_warps>((lane_id < num_warps) ? shm[lane_id] : 0.f);
+        if constexpr (all && num_warps < WARP_SIZE) {
+            v = __shfl_sync(0xffffffff, v, 0);
+        }
+    }
+    return v;
+}
+
+__device__ __forceinline__ float cg_warp_reduce_sum(float v) {
+    auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
+    return cg::reduce(warp, v, cg::plus<float>());
+}
+
+template <int block_size, bool all>
+__device__ __forceinline__ float cg_block_reduce_sum(float v) {
+    static_assert(block_size % WARP_SIZE == 0, "invalid block size");
+    auto block = cg::this_thread_block();
+    auto warp = cg::tiled_partition<WARP_SIZE>(block);
+    v = cg::reduce(warp, v, cg::plus<float>());
+    constexpr int num_warps = block_size / WARP_SIZE;
+    if constexpr (num_warps > 1) {
+        __shared__ float shm[num_warps];
+        const int warp_id = warp.meta_group_rank();
+        const int lane_id = warp.thread_rank();
+        if (lane_id == 0) {
+            shm[warp_id] = v;
+        }
+        block.sync();
+        auto tile = cg::tiled_partition<num_warps>(block);
+        v = cg::reduce(tile, (lane_id < num_warps) ? shm[lane_id] : 0.f, cg::plus<float>());
+        if constexpr (all && num_warps < WARP_SIZE) {
+            v = warp.shfl(v, 0);
+        }
     }
     return v;
 }
@@ -119,7 +153,6 @@ __device__ __forceinline__ float warp_reduce_max(float v) {
 
 template <int block_size, bool all>
 __device__ __forceinline__ float block_reduce_max(float v) {
-    static_assert(block_size % WARP_SIZE == 0, "invalid block size");
     v = warp_reduce_max(v);
     constexpr int num_warps = block_size / WARP_SIZE;
     if constexpr (num_warps > 1) {
@@ -130,8 +163,10 @@ __device__ __forceinline__ float block_reduce_max(float v) {
             shm[warp_id] = v;
         }
         __syncthreads();
-        constexpr int warp_reduce_size = all ? (1024 / WARP_SIZE) : num_warps;
-        v = warp_reduce_max<warp_reduce_size>((lane_id < num_warps) ? shm[lane_id] : -INFINITY);
+        v = warp_reduce_max<num_warps>((lane_id < num_warps) ? shm[lane_id] : -INFINITY);
+        if constexpr (all && num_warps < WARP_SIZE) {
+            v = __shfl_sync(0xffffffff, v, 0);
+        }
     }
     return v;
 }

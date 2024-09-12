@@ -1,8 +1,4 @@
 #include "common.h"
-#include <cooperative_groups.h>
-#include <cooperative_groups/reduce.h>
-
-namespace cg = cooperative_groups;
 
 template <int block_size>
 __global__ void sum_block_reduce_kernel(const float *__restrict__ input, float *__restrict__ output, int N) {
