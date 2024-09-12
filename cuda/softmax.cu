@@ -37,6 +37,36 @@ cudaError_t softmax_cuda(const float *input, float *output, int M, int N) {
     return cudaGetLastError();
 }
 
+template <int block_size>
+__global__ void online_softmax_kernel(const float *input, float *output, int N) {
+    const float *input_row = input + blockIdx.x * N;
+    float *output_row = output + blockIdx.x * N;
+
+    float m = -INFINITY;
+    float d = 0.f;
+    for (int i = threadIdx.x; i < N; i += block_size) {
+        const float x = input_row[i];
+        const float m_old = m;
+        m = fmaxf(m, x);
+        d = expf(m_old - m) * d + expf(x - m);
+    }
+    const float m_local = m;
+    m = block_reduce_max<block_size, true>(m_local);
+    d = block_reduce_sum<block_size, true>(d * expf(m_local - m));
+
+    const float inv_sum = 1.f / d;
+    for (int i = threadIdx.x; i < N; i += block_size) {
+        output_row[i] = expf(input_row[i] - m) * inv_sum;
+    }
+}
+
+cudaError_t online_softmax_cuda(const float *input, float *output, int M, int N) {
+    constexpr int block_size = 256;
+    const int grid_size = M;
+    online_softmax_kernel<block_size><<<grid_size, block_size>>>(input, output, N);
+    return cudaGetLastError();
+}
+
 int main() {
     constexpr int M = 1024;
     constexpr int N = 2048;
@@ -72,6 +102,11 @@ int main() {
     CHECK_CUDA(softmax_cuda(d_x, d_y, M, N));
     CHECK_CUDA(cudaMemcpy(h_y_cuda, d_y, M * N * sizeof(float), cudaMemcpyDeviceToHost));
 
+    // online
+    CHECK_CUDA(cudaMemsetAsync(d_y, 0, M * N * sizeof(float)));
+    CHECK_CUDA(online_softmax_cuda(d_x, d_y, M, N));
+    CHECK_CUDA(cudaMemcpy(h_y_cuda, d_y, M * N * sizeof(float), cudaMemcpyDeviceToHost));
+
     // cudnn
     const float alpha = 1.f;
     const float beta = 0.f;
@@ -86,6 +121,10 @@ int main() {
     {
         const float elapsed = timeit([&] { softmax_cuda(d_x, d_y, M, N); }, 10, 100);
         printf("[cuda] elapsed %.3f us\n", elapsed * 1e6);
+    }
+    {
+        const float elapsed = timeit([&] { online_softmax_cuda(d_x, d_y, M, N); }, 10, 100);
+        printf("[online] elapsed %.3f us\n", elapsed * 1e6);
     }
     {
         const float elapsed = timeit(
