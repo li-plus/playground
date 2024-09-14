@@ -88,7 +88,7 @@ template <int warp_size = 32>
 __device__ __forceinline__ float warp_reduce_sum(float v) {
 #pragma unroll
     for (int mask = warp_size / 2; mask > 0; mask >>= 1) {
-        v += __shfl_xor_sync(0xffffffff, v, mask, WARP_SIZE);
+        v += __shfl_xor_sync(0xffffffff, v, mask);
     }
     return v;
 }
@@ -120,7 +120,6 @@ __device__ __forceinline__ float cg_warp_reduce_sum(float v) {
 
 template <int block_size, bool all>
 __device__ __forceinline__ float cg_block_reduce_sum(float v) {
-    static_assert(block_size % WARP_SIZE == 0, "invalid block size");
     auto block = cg::this_thread_block();
     auto warp = cg::tiled_partition<WARP_SIZE>(block);
     v = cg::reduce(warp, v, cg::plus<float>());

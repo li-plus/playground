@@ -5,7 +5,7 @@ __global__ void sum_block_reduce_kernel(const float *__restrict__ input, float *
     const float *input_row = input + blockIdx.x * N;
 
     float sum = 0.f;
-    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+    for (int i = threadIdx.x; i < N; i += block_size) {
         sum += input_row[i];
     }
     sum = block_reduce_sum<block_size, false>(sum);
@@ -23,11 +23,14 @@ cudaError_t sum_block_reduce_cuda(const float *input, float *output, int M, int 
 }
 
 template <int block_size>
-__global__ void sum_warp_reduce_kernel(const float *__restrict__ input, float *__restrict__ output, int N) {
+__global__ void sum_warp_reduce_kernel(const float *__restrict__ input, float *__restrict__ output, int M, int N) {
     const int warp_id = threadIdx.x / WARP_SIZE;
     const int lane_id = threadIdx.x % WARP_SIZE;
 
     const int row_id = blockIdx.x * (block_size / WARP_SIZE) + warp_id;
+    if (row_id >= M) {
+        return;
+    }
     const float *input_row = input + row_id * N;
 
     float sum = 0.f;
@@ -43,17 +46,21 @@ __global__ void sum_warp_reduce_kernel(const float *__restrict__ input, float *_
 
 cudaError_t sum_warp_reduce_cuda(const float *input, float *output, int M, int N) {
     constexpr int block_size = 128;
-    const int grid_size = M / (block_size / WARP_SIZE);
-    sum_warp_reduce_kernel<block_size><<<grid_size, block_size>>>(input, output, N);
+    constexpr int rows_per_thread = block_size / WARP_SIZE;
+    const int grid_size = (M + rows_per_thread - 1) / rows_per_thread;
+    sum_warp_reduce_kernel<block_size><<<grid_size, block_size>>>(input, output, M, N);
     return cudaGetLastError();
 }
 
 template <int block_size>
-__global__ void sum_cg_warp_reduce_kernel(const float *__restrict__ input, float *__restrict__ output, int N) {
+__global__ void sum_cg_warp_reduce_kernel(const float *__restrict__ input, float *__restrict__ output, int M, int N) {
     auto block = cg::this_thread_block();
     auto tile = cg::tiled_partition<WARP_SIZE>(block);
 
     const int row_id = block.group_index().x * tile.meta_group_size() + tile.meta_group_rank();
+    if (row_id >= M) {
+        return;
+    }
     const float *input_row = input + row_id * N;
 
     float sum = 0.f;
@@ -70,8 +77,9 @@ __global__ void sum_cg_warp_reduce_kernel(const float *__restrict__ input, float
 
 cudaError_t sum_cg_warp_reduce_cuda(const float *input, float *output, int M, int N) {
     constexpr int block_size = 128;
-    const int grid_size = M / (block_size / WARP_SIZE);
-    sum_cg_warp_reduce_kernel<block_size><<<grid_size, block_size>>>(input, output, N);
+    constexpr int rows_per_thread = block_size / WARP_SIZE;
+    const int grid_size = (M + rows_per_thread - 1) / rows_per_thread;
+    sum_cg_warp_reduce_kernel<block_size><<<grid_size, block_size>>>(input, output, M, N);
     return cudaGetLastError();
 }
 
@@ -89,7 +97,7 @@ int main() {
     CHECK_CUDA(cudaMalloc(&d_output, M * N * sizeof(float)));
 
     for (int i = 0; i < M * N; i++) {
-        h_input[i] = uniform(-1, 1);
+        h_input[i] = uniform(-0.5f, 0.5f);
     }
     CHECK_CUDA(cudaMemcpyAsync(d_input, h_input, M * N * sizeof(float), cudaMemcpyHostToDevice));
 
