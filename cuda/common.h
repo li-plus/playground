@@ -24,15 +24,15 @@ class LogMessageFatal {
     if (!(cond))                                                                                                       \
     THROW << "check failed (" #cond ") "
 
-#define CHECK_CUDA(call)                                                                                               \
+#define CHECK_CUDA(expr)                                                                                               \
     do {                                                                                                               \
-        cudaError_t status = (call);                                                                                   \
+        cudaError_t status = (expr);                                                                                   \
         CHECK(status == cudaSuccess) << "cuda error: " << cudaGetErrorString(status);                                  \
     } while (false)
 
-#define CHECK_CUBLAS(call)                                                                                             \
+#define CHECK_CUBLAS(expr)                                                                                             \
     do {                                                                                                               \
-        cublasStatus_t status = (call);                                                                                \
+        cublasStatus_t status = (expr);                                                                                \
         CHECK(status == CUBLAS_STATUS_SUCCESS)                                                                         \
             << "cublas error: [" << cublasGetStatusName(status) << "] " << cublasGetStatusString(status);              \
     } while (false)
