@@ -82,13 +82,14 @@ static inline void check_is_close(const half *a, const half *b, size_t n, float 
 
 static inline int ceil_div(int a, int b) { return (a + b - 1) / b; }
 
+static constexpr unsigned FULL_MASK = 0xffffffff;
 static constexpr int WARP_SIZE = 32;
 
 template <int warp_size = 32>
 __device__ __forceinline__ float warp_reduce_sum(float v) {
 #pragma unroll
     for (int mask = warp_size / 2; mask > 0; mask >>= 1) {
-        v += __shfl_xor_sync(0xffffffff, v, mask);
+        v += __shfl_xor_sync(FULL_MASK, v, mask);
     }
     return v;
 }
@@ -107,7 +108,7 @@ __device__ __forceinline__ float block_reduce_sum(float v) {
         __syncthreads();
         v = warp_reduce_sum<num_warps>((lane_id < num_warps) ? shm[lane_id] : 0.f);
         if constexpr (all && num_warps < WARP_SIZE) {
-            v = __shfl_sync(0xffffffff, v, 0);
+            v = __shfl_sync(FULL_MASK, v, 0);
         }
     }
     return v;
@@ -145,7 +146,7 @@ template <int warp_size = 32>
 __device__ __forceinline__ float warp_reduce_max(float v) {
 #pragma unroll
     for (int mask = warp_size / 2; mask > 0; mask >>= 1) {
-        v = fmaxf(v, __shfl_xor_sync(0xffffffff, v, mask, 32));
+        v = fmaxf(v, __shfl_xor_sync(FULL_MASK, v, mask, 32));
     }
     return v;
 }
@@ -164,7 +165,7 @@ __device__ __forceinline__ float block_reduce_max(float v) {
         __syncthreads();
         v = warp_reduce_max<num_warps>((lane_id < num_warps) ? shm[lane_id] : -INFINITY);
         if constexpr (all && num_warps < WARP_SIZE) {
-            v = __shfl_sync(0xffffffff, v, 0);
+            v = __shfl_sync(FULL_MASK, v, 0);
         }
     }
     return v;
