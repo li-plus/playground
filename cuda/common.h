@@ -142,6 +142,23 @@ __device__ __forceinline__ float cg_block_reduce_sum(float v) {
     return v;
 }
 
+template <int block_size>
+__device__ __forceinline__ float shm_block_reduce_sum(float v) {
+    __shared__ float shm[block_size];
+
+    shm[threadIdx.x] = v;
+    __syncthreads();
+
+#pragma unroll
+    for (int stride = block_size / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            shm[threadIdx.x] += shm[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    return shm[0];
+}
+
 template <int warp_size = 32>
 __device__ __forceinline__ float warp_reduce_max(float v) {
 #pragma unroll

@@ -100,7 +100,7 @@ int main() {
         any_row_wise_cpu(h_input, h_output_expect, M, N);
 
         // cuda
-        CHECK_CUDA(cudaMemsetAsync(d_output, 0, M));
+        CHECK_CUDA(cudaMemsetAsync(d_output, 0xff, M));
         CHECK_CUDA(any_row_wise_cuda(d_input, d_output, M, N));
         CHECK_CUDA(cudaMemcpy(h_output_actual, d_output, M, cudaMemcpyDeviceToHost));
 
@@ -127,7 +127,7 @@ int main() {
         all_row_wise_cpu(h_input, h_output_expect, M, N);
 
         // cuda
-        CHECK_CUDA(cudaMemsetAsync(d_output, 0, M));
+        CHECK_CUDA(cudaMemsetAsync(d_output, 0xff, M));
         CHECK_CUDA(all_row_wise_cuda(d_input, d_output, M, N));
         CHECK_CUDA(cudaMemcpy(h_output_actual, d_output, M, cudaMemcpyDeviceToHost));
 

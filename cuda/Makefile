@@ -1,4 +1,4 @@
-TARGETS := noop fuse memcpy reduce_sum reduce_sum_dim float4 sgemv hgemv sched coalesce transpose loop cache ipc_ag softmax gemm_bias_gelu vote
+TARGETS := noop fuse memcpy reduce_sum reduce_sum_dim float4 sgemv hgemv sched coalesce transpose loop cache ipc_ag softmax gemm_bias_gelu vote sort
 
 CUDAFLAGS := -std=c++17 -gencode arch=compute_80,code=sm_80 -O3 -lineinfo
 
@@ -18,9 +18,9 @@ NVCC := nvcc
 
 all: $(TARGETS)
 
-$(TARGET_DIR)/%: %.cu
+$(TARGET_DIR)/%: %.cu common.h
 	mkdir -p $(TARGET_DIR)
-	$(NVCC) $(CUDAFLAGS) $(INCLUDES) $(LIBRARIES) $^ -o $@
+	$(NVCC) $(CUDAFLAGS) $(INCLUDES) $(LIBRARIES) $< -o $@
 
 .PHONY: lint clean
 
