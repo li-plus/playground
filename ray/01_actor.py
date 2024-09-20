@@ -4,6 +4,7 @@ Reference: https://docs.ray.io/en/latest/ray-core/walkthrough.html#calling-an-ac
 
 import ray
 
+
 # Define the Counter actor.
 @ray.remote
 class Counter:
@@ -15,6 +16,7 @@ class Counter:
 
     def incr(self, value):
         self.i += value
+
 
 # Create a Counter actor.
 c = Counter.remote()

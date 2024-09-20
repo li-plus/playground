@@ -4,10 +4,13 @@ https://github.com/ray-project/ray/blob/master/python/ray/train/torch/config.py
 https://github.com/ray-project/ray/blob/master/python/ray/train/_internal/worker_group.py
 """
 
-import ray
+import os
+
 import torch
 import torch.distributed as dist
-import os
+
+import ray
+
 
 @ray.remote(num_cpus=8, num_gpus=1)
 class TorchWorker:
@@ -15,11 +18,11 @@ class TorchWorker:
         self.rank = rank
         self.world_size = world_size
         self.local_rank = int(os.getenv("CUDA_VISIBLE_DEVICES"))
-        assert self.rank == self.local_rank, f'{self.rank=} {self.local_rank=}'
-        self.data = torch.full((1024, 1024, 1024), fill_value=rank, dtype=torch.float32, device='cuda')
+        assert self.rank == self.local_rank, f"{self.rank=} {self.local_rank=}"
+        self.data = torch.full((1024, 1024, 1024), fill_value=rank, dtype=torch.float32, device="cuda")
 
     def init_process_group(self):
-        dist.init_process_group('nccl', world_size=self.world_size, rank=self.rank)
+        dist.init_process_group("nccl", world_size=self.world_size, rank=self.rank)
 
     def set_master(self, addr, port):
         os.environ["MASTER_ADDR"] = addr
@@ -49,6 +52,7 @@ class TorchWorkerGroup:
 
     def all_reduce(self):
         return ray.get([worker.all_reduce.remote() for worker in self.workers])
+
 
 ray.init(num_cpus=65, num_gpus=8)
 worker_group = TorchWorkerGroup(world_size=8)
