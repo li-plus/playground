@@ -4,6 +4,7 @@
 #include <cooperative_groups/reduce.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
+#include <cudnn.h>
 #include <sstream>
 #include <stdio.h>
 
@@ -35,6 +36,12 @@ class LogMessageFatal {
         cublasStatus_t status = (expr);                                                                                \
         CHECK(status == CUBLAS_STATUS_SUCCESS)                                                                         \
             << "cublas error: [" << cublasGetStatusName(status) << "] " << cublasGetStatusString(status);              \
+    } while (false)
+
+#define CHECK_CUDNN(expr)                                                                                              \
+    do {                                                                                                               \
+        cudnnStatus_t status = (expr);                                                                                 \
+        CHECK(status == CUDNN_STATUS_SUCCESS) << "cudnn error: " << cudnnGetErrorString(status);                       \
     } while (false)
 
 static inline float uniform() { return rand() / (float)RAND_MAX; }

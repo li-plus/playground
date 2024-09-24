@@ -1,11 +1,4 @@
 #include "common.h"
-#include <cudnn.h>
-
-#define CHECK_CUDNN(expr)                                                                                              \
-    do {                                                                                                               \
-        cudnnStatus_t status = (expr);                                                                                 \
-        CHECK(status == CUDNN_STATUS_SUCCESS) << "cudnn error: " << cudnnGetErrorString(status);                       \
-    } while (false)
 
 template <int block_size>
 __global__ void softmax_kernel(const float *__restrict__ input, float *__restrict__ output, int N) {
