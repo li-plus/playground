@@ -1,7 +1,7 @@
 #include "common.h"
 
-__global__ void im2col_kernel(const float *im, float *col, int N, int C, int IH, int IW, int KH, int KW, int OH, int OW,
-                              int PH, int PW) {
+__global__ void im2col_kernel(const float *__restrict__ im, float *__restrict__ col, int N, int C, int IH, int IW,
+                              int KH, int KW, int OH, int OW, int PH, int PW) {
     const int numel = N * OH * OW * KH * KW * C;
     for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < numel; idx += blockDim.x * gridDim.x) {
         const int c = idx % C;
@@ -203,11 +203,9 @@ int main() {
 
     for (int i = 0; i < N * IH * IW * IC; i++) {
         h_x[i] = uniform(-0.5, 0.5);
-        // h_x[i] = i / 10.f;
     }
     for (int i = 0; i < OC * KH * KW * IC; i++) {
         h_w[i] = uniform(-0.5, 0.5);
-        // h_w[i] = i / 10.f;
     }
     CHECK_CUDA(cudaMemcpyAsync(d_x, h_x, N * IH * IW * IC * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpyAsync(d_w, h_w, OC * KH * KW * IC * sizeof(float), cudaMemcpyHostToDevice));
