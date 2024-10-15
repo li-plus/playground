@@ -98,7 +98,7 @@ class AllGatherOp(torch.autograd.Function):
         return output
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
+    def backward(ctx, grad_output: torch.Tensor):
         grad_input = torch.empty(
             (grad_output.shape[0] // ctx.group.size(), *grad_output.shape[1:]),
             dtype=grad_output.dtype,
