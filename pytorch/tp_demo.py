@@ -26,10 +26,10 @@ class AllReduceBackwardOp(torch.autograd.Function):
 class ColumnParallelLinear(nn.Module):
     def __init__(self, linear: nn.Linear, group: dist.ProcessGroup) -> None:
         super().__init__()
-        self.weight = linear.weight.chunk(group.size(), dim=0)[group.rank()]
+        self.weight = nn.Parameter(linear.weight.chunk(group.size(), dim=0)[group.rank()])
         self.bias = None
         if linear.bias is not None:
-            self.bias = linear.bias.chunk(group.size(), dim=0)[group.rank()]
+            self.bias = nn.Parameter(linear.bias.chunk(group.size(), dim=0)[group.rank()])
         self.group = group
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -51,7 +51,7 @@ class AllReduceForwardOp(torch.autograd.Function):
 class RowParallelLinear(nn.Module):
     def __init__(self, linear: nn.Linear, group: dist.ProcessGroup) -> None:
         super().__init__()
-        self.weight = linear.weight.chunk(group.size(), dim=1)[group.rank()]
+        self.weight = nn.Parameter(linear.weight.chunk(group.size(), dim=1)[group.rank()])
         self.bias = linear.bias
         self.group = group
 
@@ -77,6 +77,7 @@ def main():
 
     batch_size = 2
     seq_len = 1024
+    max_grad_norm = 1e6
 
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
@@ -94,6 +95,7 @@ def main():
     grad_output = torch.randn_like(output_tp1.logits) / 1e4
     output_tp1.logits.backward(grad_output)
     embed_grad_tp1 = model.model.embed_tokens.weight.grad
+    grad_norm_tp1 = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm).float()
     for param in model.parameters():
         param.grad = None
 
@@ -115,8 +117,25 @@ def main():
     output_tpn.logits.backward(grad_output)
     embed_grad_tpn = model.model.embed_tokens.weight.grad
 
-    torch.testing.assert_close(output_tp1, output_tpn, rtol=0.1, atol=1.0)
-    torch.testing.assert_close(embed_grad_tp1, embed_grad_tpn, rtol=0.1, atol=1.0)
+    # compute grad_norm
+    shard_grads = []
+    for m in model.modules():
+        if isinstance(m, ColumnParallelLinear):
+            shard_grads.append(m.weight.grad)
+            if m.bias is not None:
+                shard_grads.append(m.bias.grad)
+        elif isinstance(m, RowParallelLinear):
+            shard_grads.append(m.weight.grad)
+
+    full_grads = {x.grad for x in model.parameters()} - set(shard_grads)
+    grad_sq = torch.cat([x.flatten() for x in shard_grads]).float().square().sum()
+    dist.all_reduce(grad_sq)
+    grad_sq += torch.cat([x.flatten() for x in full_grads]).float().square().sum()
+    grad_norm_tpn = grad_sq.sqrt()
+
+    torch.testing.assert_close(output_tpn, output_tp1, rtol=0.1, atol=1.0)
+    torch.testing.assert_close(embed_grad_tpn, embed_grad_tp1, rtol=0.1, atol=1.0)
+    torch.testing.assert_close(grad_norm_tpn, grad_norm_tp1, rtol=0.01, atol=0.01)
 
 
 if __name__ == "__main__":

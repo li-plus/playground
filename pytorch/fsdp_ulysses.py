@@ -11,8 +11,8 @@ import torch
 import torch.distributed as dist
 import transformers.models.llama.modeling_llama as modeling_llama
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import ShardingStrategy
-from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from transformers import AutoModelForCausalLM, set_seed
 
 logger = logging.getLogger(__name__)
@@ -21,6 +21,7 @@ ulysses_group: dist.ProcessGroup = None
 
 
 class AllToAllOp(torch.autograd.Function):
+    @staticmethod
     def forward(
         ctx, input: torch.Tensor, scatter_dim: int, gather_dim: int, group: dist.ProcessGroup = None
     ) -> torch.Tensor:
@@ -33,6 +34,7 @@ class AllToAllOp(torch.autograd.Function):
         output = torch.cat(output_list, dim=gather_dim)
         return output
 
+    @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
         grad_output_list = [x.contiguous() for x in grad_output.chunk(ctx.group.size(), dim=ctx.gather_dim)]
         grad_input_list = [torch.empty_like(x) for x in grad_output_list]
@@ -45,6 +47,26 @@ def all_to_all_to_ulysses_region(
     input: torch.Tensor, scatter_dim: int, gather_dim: int, group: dist.ProcessGroup = None
 ):
     return AllToAllOp.apply(input, scatter_dim, gather_dim, group)
+
+
+class GatherOp(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input: torch.Tensor, dim: int, group: dist.ProcessGroup) -> torch.Tensor:
+        ctx.dim = dim
+        ctx.group = group
+        output_list = [torch.empty_like(input) for _ in range(group.size())]
+        dist.all_gather(output_list, input.contiguous(), group=group)
+        output = torch.cat(output_list, dim=dim)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        grad_input = grad_output.chunk(ctx.group.size(), dim=ctx.dim)[ctx.group.rank()]
+        return grad_input, None, None
+
+
+def gather_from_ulysses_region(input: torch.Tensor, dim: int, group: dist.ProcessGroup) -> torch.Tensor:
+    return GatherOp.apply(input, dim, group)
 
 
 def apply_ulysses(_flash_attention_forward):
@@ -115,13 +137,12 @@ def main():
     model_id = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 
     batch_size = 1
-    seq_len = 8
+    seq_len = 1024 * world_size
 
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         attn_implementation="flash_attention_2",
-        torch_dtype=torch.bfloat16,
-        device_map="cuda",
+        torch_dtype=torch.float32,
         low_cpu_mem_usage=True,
     )
 
@@ -129,45 +150,66 @@ def main():
     attention_mask = torch.ones(batch_size, seq_len, device="cuda")
     position_ids = torch.arange(0, seq_len, device="cuda").unsqueeze(0).expand(batch_size, seq_len)
 
-    # fsdp forward
+    # https://github.com/huggingface/accelerate/blob/a84327e59652b79b1f6e3be58be634fbd35184f3/src/accelerate/utils/dataclasses.py#L1745-L1759
+    auto_wrap_policy = functools.partial(
+        transformer_auto_wrap_policy, transformer_layer_cls={modeling_llama.LlamaDecoderLayer}
+    )
+    mixed_precision = MixedPrecision(
+        param_dtype=torch.float32, reduce_dtype=torch.bfloat16, buffer_dtype=torch.bfloat16
+    )
     model = FSDP(
         model,
         sharding_strategy=ShardingStrategy.FULL_SHARD,
-        auto_wrap_policy=size_based_auto_wrap_policy,
+        auto_wrap_policy=auto_wrap_policy,
+        mixed_precision=mixed_precision,
+        device_id=torch.cuda.current_device(),
         use_orig_params=True,
     )
-    output_base = model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, use_cache=False)
 
-    # fsdp backward
-    grad_output = torch.randn_like(output_base.logits) / 1e4
-    output_base.logits.backward(grad_output)
-    with FSDP.summon_full_params(model, with_grads=True):
-        embed_grad_base = model.model.embed_tokens.weight.grad
-        for param in model.parameters():
-            param.grad = None
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        # fsdp forward
+        output_base = model(
+            input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, use_cache=False
+        )
+
+        # fsdp backward
+        grad_output = torch.randn_like(output_base.logits) / 1e4
+        output_base.logits.backward(grad_output)
+
+    max_grad_norm = 1e6
+    grad_norm_base = model.clip_grad_norm_(max_grad_norm)
+
+    for param in model.parameters():
+        param.grad = None
 
     # apply ulysses
     modeling_llama._flash_attention_forward = apply_ulysses(modeling_llama._flash_attention_forward)
 
-    # ulysses forward
     ulysses_group = dist.group.WORLD
     chunk_size = seq_len // ulysses_group.size()
     chunk_slice = slice(chunk_size * ulysses_group.rank(), chunk_size * (ulysses_group.rank() + 1))
-    output_ulysses = model(
-        input_ids=input_ids[:, chunk_slice],
-        attention_mask=attention_mask[:, chunk_slice],
-        position_ids=position_ids[:, chunk_slice],
-        use_cache=False,
-    )
 
-    # ulysses backward
-    output_ulysses.logits.backward(grad_output[:, chunk_slice])
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        for _ in range(ulysses_group.size()):
+            # ulysses forward
+            output_ulysses = model(
+                input_ids=input_ids[:, chunk_slice],
+                attention_mask=attention_mask[:, chunk_slice],
+                position_ids=position_ids[:, chunk_slice],
+                use_cache=False,
+            )
+            output_ulysses.logits = gather_from_ulysses_region(output_ulysses.logits, dim=1, group=ulysses_group)
 
-    with FSDP.summon_full_params(model, with_grads=True):
-        embed_grad_ulysses = model.model.embed_tokens.weight.grad
+            # ulysses backward
+            output_ulysses.logits.backward(grad_output)
 
-    torch.testing.assert_close(output_ulysses.logits, output_base.logits[:, chunk_slice], atol=1.0, rtol=1e-2)
-    torch.testing.assert_close(embed_grad_base, embed_grad_ulysses, atol=1.0, rtol=1e-2)
+    grad_norm_ulysses = model.clip_grad_norm_(max_grad_norm)
+
+    # with FSDP.summon_full_params(model, with_grads=True):
+    #     embed_grad_ulysses = model.model.embed_tokens.weight.grad
+
+    torch.testing.assert_close(output_ulysses, output_base, atol=1.0, rtol=1e-2)
+    torch.testing.assert_close(grad_norm_base, grad_norm_ulysses, atol=0.01, rtol=1e-3)
 
     dist.destroy_process_group()
 
