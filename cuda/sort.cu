@@ -19,7 +19,8 @@ __device__ __forceinline__ void bitonic_merge(int *s_vec, int size) {
     const bool dir = threadIdx.x & (size / 2);
 #pragma unroll
     for (int stride = size / 2; stride > 0; stride /= 2) {
-        const int pos = (threadIdx.x / stride) * (stride * 2) + threadIdx.x % stride;
+        // const int pos = (threadIdx.x / stride) * (stride * 2) + threadIdx.x % stride;
+        const int pos = 2 * threadIdx.x - threadIdx.x % stride;
         bitonic_swap(&s_vec[pos], &s_vec[pos + stride], dir);
         __syncthreads();
     }
