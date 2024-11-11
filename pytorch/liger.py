@@ -61,17 +61,13 @@ print("===== liger + silu-mul-linear fusion =====")
 class SiLUMulLinearFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, gate: torch.Tensor, up: torch.Tensor, down_w: torch.Tensor) -> torch.Tensor:
-        # print(type(ctx))
         ctx.save_for_backward(gate, up, down_w)
         return F.linear(F.silu(gate) * up, down_w)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # grad_output: [b, s, h]
-        # gate: [b, s, 4h]
-        # up: [b, s, 4h]
-        # down_w [h, 4h]
-        gate, up, down_w = ctx.saved_tensors
+        gate, up, down_w = ctx.saved_tensors  # gate: [b, s, 4h], up: [b, s, 4h], down_w [h, 4h]
 
         gate_act = F.silu(gate)  # [b, s, 4h]
         gate_act_mul_up = gate_act * up  # [b, s, 4h]
@@ -87,6 +83,22 @@ class SiLUMulLinearFunction(torch.autograd.Function):
         grad_gate = torch.ops.aten.silu_backward(grad_input, gate)
 
         return grad_gate, grad_up, grad_down_w
+
+
+class FusedSwiGLUMLP(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        if config.hidden_act not in ["silu", "swish"]:
+            raise ValueError(f"Activation function {config.hidden_act} not supported.")
+
+    def forward(self, x):
+        return SiLUMulLinearFunction.apply(self.gate_proj(x), self.up_proj(x), self.down_proj.weight)
 
 
 def test_silu_mul_linear_function():
@@ -116,21 +128,5 @@ def test_silu_mul_linear_function():
 test_silu_mul_linear_function()
 
 
-class MemoryEfficientSwiGLUMLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        if config.hidden_act not in ["silu", "swish"]:
-            raise ValueError(f"Activation function {config.hidden_act} not supported.")
-
-    def forward(self, x):
-        return SiLUMulLinearFunction.apply(self.gate_proj(x), self.up_proj(x), self.down_proj.weight)
-
-
-modeling_llama.LlamaMLP = MemoryEfficientSwiGLUMLP
+modeling_llama.LlamaMLP = FusedSwiGLUMLP
 run_model()
