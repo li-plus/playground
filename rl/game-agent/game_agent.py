@@ -1,4 +1,5 @@
 import json
+import random
 import re
 from pathlib import Path
 from typing import Optional, Union
@@ -11,7 +12,7 @@ from tensordict import TensorDict
 from transformers import ProcessorMixin
 
 
-def get_action_meanings(env: gym.vector.VectorEnv):
+def get_action_meanings(env: gym.vector.VectorEnv) -> list[str]:
     with gym.make(env.spec.id) as dummy_env:
         action_meanings = dummy_env.unwrapped.get_action_meanings()
     return action_meanings
@@ -28,14 +29,19 @@ class Qwen2VLInputProcessor:
         env_prompt = env_doc["env_description"]
         if env_doc["reward_description"]:
             env_prompt += " " + env_doc["reward_description"]
-        valid_action_prompt = ", ".join(get_action_meanings(env))
-        self.instruction = f"You are an excellent video game player able to achieve high scores by making proper decisions. The image shows the current game status of Atari game {env.spec.name}. {env_prompt} The current legal actions are: {valid_action_prompt}. You must choose a legal action to maximize the final scores. Answer only the action name in upper case without explanation."
+        self.legal_action_texts = get_action_meanings(env)
+        self.instruction_format = f"You are an excellent video game player able to achieve high scores by making proper decisions. The image shows the current game status of Atari game {env.spec.name}. {env_prompt} The current legal actions are: {{legal_action_prompt}}. You must choose a legal action to maximize the final scores. Answer only the action name in upper case without explanation."
         self.processor = processor
 
     @staticmethod
     def camel_case_to_snake_case(name: str) -> str:
         # https://stackoverflow.com/questions/1175208/elegant-python-function-to-convert-camelcase-to-snake-case
         return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+    def get_instruction(self):
+        action_texts = self.legal_action_texts.copy()
+        random.shuffle(action_texts)
+        return self.instruction_format.format(legal_action_prompt=", ".join(action_texts))
 
     def build_conversations(self, observation: list[np.ndarray]) -> Conversations:
         conversations = []
@@ -48,7 +54,7 @@ class Qwen2VLInputProcessor:
                             "type": "image",
                             "image": Image.fromarray(obs),
                         },
-                        {"type": "text", "text": self.instruction},
+                        {"type": "text", "text": self.get_instruction()},
                     ],
                 }
             ]

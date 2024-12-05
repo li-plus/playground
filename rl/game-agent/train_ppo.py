@@ -193,7 +193,7 @@ class PPOTrainer:
 
         self.legal_action_texts = get_action_meanings(env)
         action_ids = self.actor_tokenizer(self.legal_action_texts).input_ids
-        max_new_tokens = max(len(x) for x in action_ids) + 1  # plus 1 for the eos token
+        max_new_tokens = max(len(x) for x in action_ids)
         self.generation_config = GenerationConfig(
             do_sample=config.do_sample,
             temperature=config.temperature,
@@ -643,11 +643,11 @@ def main():
 --use_liger_kernel --clip_range_reward 1 --vec_env_mode async
 """.split()
 
-#     # debug
-#     sys.argv += """
-# --num_rollout_timesteps 128 --rollout_batch_size 32
-# --train_batch_size 64 --train_micro_batch_size 64
-# """.split()
+    #     # debug
+    #     sys.argv += """
+    # --num_rollout_timesteps 128 --rollout_batch_size 32
+    # --train_batch_size 64 --train_micro_batch_size 64
+    # """.split()
 
     #     sys.argv += '''
     # --profiler_enable --num_rollout_timesteps 64 --rollout_batch_size 64 --train_batch_size 64 --num_ppo_epochs 1
