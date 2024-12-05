@@ -243,7 +243,7 @@ class PPOTrainer:
         # Let's say action a consists of n tokens: x1, x2, ..., xn. Then:
         # p(a) = p(x1) * p(x2|x1) * ... * p(xn|x1...x_{n-1})
         # log p(a) = log p(x1) + log p(x2|x1) + ... + log p(xn|x1...x_{n-1})
-        old_log_probs = (old_log_probs * output_mask).sum(dim=-1)
+        old_log_probs = old_log_probs.masked_fill_(output_mask == 0, 0).sum(dim=-1)
 
         # map response to action id
         action_texts = self.actor_tokenizer.batch_decode(output_ids, skip_special_tokens=True)
@@ -384,7 +384,7 @@ class PPOTrainer:
         logits = logits_processor(sequence_ids, logits)
 
         log_probs = logprobs_from_logits(logits[:, input_len - 1 : -1], output_ids)
-        log_probs = (log_probs * output_mask).sum(dim=-1)
+        log_probs = log_probs.masked_fill(output_mask == 0, 0).sum(dim=-1)
 
         log_ratio = log_probs - old_log_probs
         ratio = log_ratio.exp()
