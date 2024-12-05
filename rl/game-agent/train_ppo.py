@@ -519,6 +519,11 @@ class PPOTrainer:
         returns = batch.get("returns")
         rewards = batch.get("rewards")
         old_values = batch.get("old_values")
+        actions = batch.get("actions")
+
+        action_probs = {}
+        for action_idx, action_text in enumerate(self.legal_action_texts):
+            action_probs[f"policy/action_prob_{action_text}"] = (actions == action_idx).mean(dtype=torch.float32).item()
 
         stats = {
             "step": self.global_step,
@@ -631,7 +636,16 @@ class Arguments:
 def main():
     import sys
 
-    sys.argv += "--use_liger_kernel --clip_range_reward 1 --vec_env_mode async".split()
+    sys.argv += """
+--use_liger_kernel --clip_range_reward 1 --vec_env_mode async
+""".split()
+
+#     # debug
+#     sys.argv += """
+# --num_rollout_timesteps 128 --rollout_batch_size 32
+# --train_batch_size 64 --train_micro_batch_size 64
+# """.split()
+
     #     sys.argv += '''
     # --profiler_enable --num_rollout_timesteps 64 --rollout_batch_size 64 --train_batch_size 64 --num_ppo_epochs 1
     # '''.split()
