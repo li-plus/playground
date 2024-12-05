@@ -279,6 +279,7 @@ class PPOTrainer:
                 actions=torch.tensor(actions, dtype=torch.long),
                 rewards=rewards,
                 dones=torch.tensor(dones, dtype=torch.bool),
+                is_illegal=is_illegal,
             )
         )
         return batch
@@ -520,16 +521,18 @@ class PPOTrainer:
         rewards = batch.get("rewards")
         old_values = batch.get("old_values")
         actions = batch.get("actions")
+        is_illegal_actions = batch.get("is_illegal")
 
-        action_probs = {}
+        action_stats = {f"policy/action_prob_ILLEGAL": is_illegal_actions.mean(dtype=torch.float32).item()}
         for action_idx, action_text in enumerate(self.legal_action_texts):
-            action_probs[f"policy/action_prob_{action_text}"] = (actions == action_idx).mean(dtype=torch.float32).item()
+            action_stats[f"policy/action_prob_{action_text}"] = (actions == action_idx).mean(dtype=torch.float32).item()
 
         stats = {
             "step": self.global_step,
             **{f"policy/lr_group_{i}": pg["lr"] for i, pg in enumerate(self.actor_optimizer.param_groups)},
             **{f"value/lr_group_{i}": pg["lr"] for i, pg in enumerate(self.critic_optimizer.param_groups)},
             **train_stats,
+            **action_stats,
             "policy/advantages_mean": advantages.mean().item(),
             "policy/advantages_var": advantages.var().item(),
             "policy/rewards_mean": rewards.mean().item(),
