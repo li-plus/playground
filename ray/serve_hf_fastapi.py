@@ -1,11 +1,11 @@
 """
-ray serve: https://docs.ray.io/en/latest/serve/getting_started.html
+ray serve: https://docs.ray.io/en/latest/serve/index.html
 """
 
 from __future__ import annotations
 
 import torch
-from starlette.requests import Request
+from fastapi import FastAPI
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
 
 from ray import serve
@@ -14,7 +14,11 @@ Conversation = list[dict[str, str]]
 Conversations = list[Conversation]
 
 
+app = FastAPI()
+
+
 @serve.deployment(num_replicas=8, ray_actor_options={"num_cpus": 1, "num_gpus": 1})
+@serve.ingress(app)
 class Generator:
     def __init__(self, model_id: str) -> None:
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left", trust_remote_code=True)
@@ -28,6 +32,7 @@ class Generator:
             trust_remote_code=True,
         ).eval()
 
+    @app.post("/")
     def generate(self, conversations: Conversations) -> Conversations:
         inputs = self.tokenizer.apply_chat_template(
             conversations,
@@ -45,10 +50,6 @@ class Generator:
         for conv, output_text in zip(conversations, output_texts):
             conv.append({"role": "assistant", "content": output_text})
         return conversations
-
-    async def __call__(self, http_request: Request) -> str:
-        payload: str = await http_request.json()
-        return self.generate(payload)
 
 
 app = Generator.bind(model_id="Qwen/Qwen2.5-0.5B-Instruct")
