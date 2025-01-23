@@ -4,11 +4,14 @@ ray serve: https://docs.ray.io/en/latest/serve/index.html
 
 from __future__ import annotations
 
+import os
+
 import torch
 from fastapi import FastAPI
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
 
 from ray import serve
+from ray.runtime_env import RuntimeEnv
 
 Conversation = list[dict[str, str]]
 Conversations = list[Conversation]
@@ -17,7 +20,9 @@ Conversations = list[Conversation]
 app = FastAPI()
 
 
-@serve.deployment(num_replicas=8, ray_actor_options={"num_cpus": 1, "num_gpus": 1})
+@serve.deployment(
+    num_replicas=1, ray_actor_options={"num_gpus": 1, "runtime_env": RuntimeEnv(env_vars=dict(os.environ))}
+)
 @serve.ingress(app)
 class Generator:
     def __init__(self, model_id: str) -> None:

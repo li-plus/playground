@@ -4,17 +4,20 @@ ray serve: https://docs.ray.io/en/latest/serve/getting_started.html
 
 from __future__ import annotations
 
+import os
+
 import torch
 from starlette.requests import Request
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
 
 from ray import serve
+from ray.runtime_env import RuntimeEnv
 
 Conversation = list[dict[str, str]]
 Conversations = list[Conversation]
 
 
-@serve.deployment(num_replicas=8, ray_actor_options={"num_cpus": 1, "num_gpus": 1})
+@serve.deployment
 class Generator:
     def __init__(self, model_id: str) -> None:
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left", trust_remote_code=True)
@@ -51,7 +54,10 @@ class Generator:
         return self.generate(payload)
 
 
-app = Generator.bind(model_id="Qwen/Qwen2.5-0.5B-Instruct")
+app = Generator.options(
+    num_replicas=1,
+    ray_actor_options={"num_cpus": 1, "num_gpus": 1, "runtime_env": RuntimeEnv(env_vars=dict(os.environ))},
+).bind(model_id="Qwen/Qwen2.5-0.5B-Instruct")
 
 if __name__ == "__main__":
     serve.shutdown()
