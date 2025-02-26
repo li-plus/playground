@@ -78,6 +78,7 @@ def shared_prefix(model: Qwen2ForCausalLM, prefix_len: int):
         return hidden_states
 
     def to_shared(hidden_states: torch.Tensor) -> torch.Tensor:
+        assert len(hidden_states) == 2
         return torch.cat((hidden_states[0], hidden_states[1, prefix_len:])).unsqueeze(0)
 
     def wrap_layer_forward(self: Qwen2DecoderLayer, hidden_states: torch.Tensor, *args, **kwargs):
