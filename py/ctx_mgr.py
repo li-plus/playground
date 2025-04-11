@@ -17,14 +17,18 @@ with ctx():
 
 def ctx_a():
     print("preparing ctx a")
-    yield
-    print("cleaning up ctx a")
+    try:
+        yield
+    finally:
+        print("cleaning up ctx a")
 
 
 def ctx_b():
     print("preparing ctx b")
-    yield
-    print("cleaning up ctx b")
+    try:
+        yield
+    finally:
+        print("cleaning up ctx b")
 
 
 @contextmanager
