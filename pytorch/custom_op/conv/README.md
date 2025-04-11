@@ -1,5 +1,5 @@
 # Convolution using cudnn
 
 ```sh
-python3 conv.py
+pytest -s test_conv.py
 ```

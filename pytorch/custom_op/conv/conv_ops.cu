@@ -3,15 +3,6 @@
 #include <c10/cuda/CUDACachingAllocator.h>
 #include <torch/extension.h>
 
-__global__ void diag_mat_mul_kernel(const float *A, const float *B, float *C, int N, int M) {
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
-    int col = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (row < N && col < M) {
-        C[row * M + col] = A[row] * B[row * M + col];
-    }
-}
-
 #define CHECK_CUDNN(status) AT_CUDNN_CHECK(status, " at " __FILE__ ":", __LINE__)
 
 torch::Tensor conv2d(torch::Tensor input, torch::Tensor weight, std::optional<torch::Tensor> bias,
@@ -42,46 +33,65 @@ torch::Tensor conv2d(torch::Tensor input, torch::Tensor weight, std::optional<to
     CHECK_CUDNN(
         cudnnSetConvolution2dDescriptor(conv_desc, PH, PW, SH, SW, DH, DW, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT));
 
-    cudnnTensorDescriptor_t x_desc;
-    CHECK_CUDNN(cudnnCreateTensorDescriptor(&x_desc));
-    CHECK_CUDNN(cudnnSetTensor4dDescriptor(x_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, IC, IH, IW));
+    cudnnTensorDescriptor_t input_desc;
+    CHECK_CUDNN(cudnnCreateTensorDescriptor(&input_desc));
+    CHECK_CUDNN(cudnnSetTensor4dDescriptor(input_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, IC, IH, IW));
 
-    cudnnFilterDescriptor_t w_desc;
-    CHECK_CUDNN(cudnnCreateFilterDescriptor(&w_desc));
-    CHECK_CUDNN(cudnnSetFilter4dDescriptor(w_desc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, OC, IC, KH, KW));
+    cudnnFilterDescriptor_t weight_desc;
+    CHECK_CUDNN(cudnnCreateFilterDescriptor(&weight_desc));
+    CHECK_CUDNN(cudnnSetFilter4dDescriptor(weight_desc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, OC, IC, KH, KW));
 
     int ON, OC_COMP, OH, OW;
-    CHECK_CUDNN(cudnnGetConvolution2dForwardOutputDim(conv_desc, x_desc, w_desc, &ON, &OC_COMP, &OH, &OW));
+    CHECK_CUDNN(cudnnGetConvolution2dForwardOutputDim(conv_desc, input_desc, weight_desc, &ON, &OC_COMP, &OH, &OW));
     TORCH_CHECK(ON == N && OC_COMP == OC);
 
-    cudnnTensorDescriptor_t y_desc;
-    CHECK_CUDNN(cudnnCreateTensorDescriptor(&y_desc));
-    CHECK_CUDNN(cudnnSetTensor4dDescriptor(y_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, OC, OH, OW));
+    cudnnTensorDescriptor_t output_desc;
+    CHECK_CUDNN(cudnnCreateTensorDescriptor(&output_desc));
+    CHECK_CUDNN(cudnnSetTensor4dDescriptor(output_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, OC, OH, OW));
 
     torch::Tensor output = torch::empty({N, OC, OH, OW}, input.options());
 
-    const float *x = input.const_data_ptr<float>();
-    const float *w = weight.const_data_ptr<float>();
-    float *y = output.mutable_data_ptr<float>();
+    const float *input_ptr = input.const_data_ptr<float>();
+    const float *weight_ptr = weight.const_data_ptr<float>();
+    float *output_ptr = output.mutable_data_ptr<float>();
 
     cudnnConvolutionFwdAlgo_t algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM;
 
     size_t workspace_size;
-    CHECK_CUDNN(
-        cudnnGetConvolutionForwardWorkspaceSize(handle, x_desc, w_desc, conv_desc, y_desc, algo, &workspace_size));
+    CHECK_CUDNN(cudnnGetConvolutionForwardWorkspaceSize(handle, input_desc, weight_desc, conv_desc, output_desc, algo,
+                                                        &workspace_size));
 
     auto &allocator = *c10::cuda::CUDACachingAllocator::get();
     auto workspace = allocator.allocate(workspace_size);
 
     const float alpha = 1.f;
     const float beta = 0.f;
-    CHECK_CUDNN(cudnnConvolutionForward(handle, &alpha, x_desc, x, w_desc, w, conv_desc, algo, workspace.get(),
-                                        workspace_size, &beta, y_desc, y));
+    if (bias) {
+        TORCH_CHECK(bias->ndimension() == 1 && bias->numel() == OC);
+        cudnnTensorDescriptor_t bias_desc;
+        CHECK_CUDNN(cudnnCreateTensorDescriptor(&bias_desc));
+        CHECK_CUDNN(cudnnSetTensor4dDescriptor(bias_desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, OC, 1, 1));
+        const float *bias_ptr = bias->const_data_ptr<float>();
+
+        cudnnActivationDescriptor_t act_desc;
+        CHECK_CUDNN(cudnnCreateActivationDescriptor(&act_desc));
+        CHECK_CUDNN(cudnnSetActivationDescriptor(act_desc, CUDNN_ACTIVATION_IDENTITY, CUDNN_NOT_PROPAGATE_NAN, 0.0));
+
+        CHECK_CUDNN(cudnnConvolutionBiasActivationForward(
+            handle, &alpha, input_desc, input_ptr, weight_desc, weight_ptr, conv_desc, algo, workspace.get(),
+            workspace_size, &beta, output_desc, output_ptr, bias_desc, bias_ptr, act_desc, output_desc, output_ptr));
+
+        CHECK_CUDNN(cudnnDestroyActivationDescriptor(act_desc));
+        CHECK_CUDNN(cudnnDestroyTensorDescriptor(bias_desc));
+    } else {
+        CHECK_CUDNN(cudnnConvolutionForward(handle, &alpha, input_desc, input_ptr, weight_desc, weight_ptr, conv_desc,
+                                            algo, workspace.get(), workspace_size, &beta, output_desc, output_ptr));
+    }
 
     CHECK_CUDNN(cudnnDestroyConvolutionDescriptor(conv_desc));
-    CHECK_CUDNN(cudnnDestroyFilterDescriptor(w_desc));
-    CHECK_CUDNN(cudnnDestroyTensorDescriptor(x_desc));
-    CHECK_CUDNN(cudnnDestroyTensorDescriptor(y_desc));
+    CHECK_CUDNN(cudnnDestroyFilterDescriptor(weight_desc));
+    CHECK_CUDNN(cudnnDestroyTensorDescriptor(input_desc));
+    CHECK_CUDNN(cudnnDestroyTensorDescriptor(output_desc));
 
     return output;
 }
@@ -140,8 +150,26 @@ torch::Tensor convnd(torch::Tensor input, torch::Tensor weight, std::optional<to
     const float alpha = 1.f;
     const float beta = 0.f;
     if (bias) {
-        // CHECK_CUDNN(cudnnConvolutionBiasActivationForward(handle, &alpha, input_desc, input_ptr, weight_desc,
-        // weight_ptr, conv_desc, algo, workspace.get(), workspace_size, &alpha));
+        TORCH_CHECK(bias->ndimension() == 1 && bias->numel() == weight.size(0));
+        std::vector<int> bias_dims(output.ndimension(), 1);
+        bias_dims.at(1) = bias->numel();
+        std::vector<int> bias_strides(output.ndimension(), bias->stride(0));
+        cudnnTensorDescriptor_t bias_desc;
+        CHECK_CUDNN(cudnnCreateTensorDescriptor(&bias_desc));
+        CHECK_CUDNN(cudnnSetTensorNdDescriptor(bias_desc, CUDNN_DATA_FLOAT, bias_dims.size(), bias_dims.data(),
+                                               bias_strides.data()));
+        const float *bias_ptr = bias->const_data_ptr<float>();
+
+        cudnnActivationDescriptor_t act_desc;
+        CHECK_CUDNN(cudnnCreateActivationDescriptor(&act_desc));
+        CHECK_CUDNN(cudnnSetActivationDescriptor(act_desc, CUDNN_ACTIVATION_IDENTITY, CUDNN_NOT_PROPAGATE_NAN, 0.0));
+
+        CHECK_CUDNN(cudnnConvolutionBiasActivationForward(
+            handle, &alpha, input_desc, input_ptr, weight_desc, weight_ptr, conv_desc, algo, workspace.get(),
+            workspace_size, &beta, output_desc, output_ptr, bias_desc, bias_ptr, act_desc, output_desc, output_ptr));
+
+        CHECK_CUDNN(cudnnDestroyActivationDescriptor(act_desc));
+        CHECK_CUDNN(cudnnDestroyTensorDescriptor(bias_desc));
     } else {
         CHECK_CUDNN(cudnnConvolutionForward(handle, &alpha, input_desc, input_ptr, weight_desc, weight_ptr, conv_desc,
                                             algo, workspace.get(), workspace_size, &beta, output_desc, output_ptr));
@@ -158,9 +186,6 @@ torch::Tensor convnd(torch::Tensor input, torch::Tensor weight, std::optional<to
 torch::Tensor conv1d(torch::Tensor input, torch::Tensor weight, std::optional<torch::Tensor> bias,
                      const std::vector<int> &stride, const std::vector<int> &padding,
                      const std::vector<int> &dilation) {
-    if (bias) {
-        bias.value().unsqueeze_(-2);
-    }
     torch::Tensor output = ::conv2d(input.unsqueeze(-2), weight.unsqueeze(-2), bias, {1, stride.at(0)},
                                     {0, padding.at(0)}, {1, dilation.at(0)});
     return output.squeeze(-2);
