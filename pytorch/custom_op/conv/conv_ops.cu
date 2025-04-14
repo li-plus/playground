@@ -61,8 +61,7 @@ torch::Tensor conv2d(torch::Tensor input, torch::Tensor weight, std::optional<to
     CHECK_CUDNN(cudnnGetConvolutionForwardWorkspaceSize(handle, input_desc, weight_desc, conv_desc, output_desc, algo,
                                                         &workspace_size));
 
-    auto &allocator = *c10::cuda::CUDACachingAllocator::get();
-    auto workspace = allocator.allocate(workspace_size);
+    auto workspace = c10::cuda::CUDACachingAllocator::get()->allocate(workspace_size);
 
     const float alpha = 1.f;
     const float beta = 0.f;
@@ -144,8 +143,7 @@ torch::Tensor convnd(torch::Tensor input, torch::Tensor weight, std::optional<to
     CHECK_CUDNN(cudnnGetConvolutionForwardWorkspaceSize(handle, input_desc, weight_desc, conv_desc, output_desc, algo,
                                                         &workspace_size));
 
-    auto &allocator = *c10::cuda::CUDACachingAllocator::get();
-    auto workspace = allocator.allocate(workspace_size);
+    auto workspace = c10::cuda::CUDACachingAllocator::get()->allocate(workspace_size);
 
     const float alpha = 1.f;
     const float beta = 0.f;
@@ -191,8 +189,192 @@ torch::Tensor conv1d(torch::Tensor input, torch::Tensor weight, std::optional<to
     return output.squeeze(-2);
 }
 
+inline cudnnTensorDescriptor_t create_tensor_descriptor(torch::Tensor tensor) {
+    std::vector<int> tensor_dims(tensor.sizes().begin(), tensor.sizes().end());
+    std::vector<int> tensor_strides(tensor.strides().begin(), tensor.strides().end());
+    cudnnTensorDescriptor_t tensor_desc;
+    CHECK_CUDNN(cudnnCreateTensorDescriptor(&tensor_desc));
+    CHECK_CUDNN(cudnnSetTensorNdDescriptor(tensor_desc, CUDNN_DATA_FLOAT, tensor.ndimension(), tensor_dims.data(),
+                                           tensor_strides.data()));
+    return tensor_desc;
+}
+
+inline void destroy_tensor_descriptor(cudnnTensorDescriptor_t tensor_desc) {
+    CHECK_CUDNN(cudnnDestroyTensorDescriptor(tensor_desc));
+}
+
+inline cudnnFilterDescriptor_t create_filter_descriptor(torch::Tensor weight) {
+    std::vector<int> weight_dims(weight.sizes().begin(), weight.sizes().end());
+    std::vector<int> weight_strides(weight.strides().begin(), weight.strides().end());
+    cudnnFilterDescriptor_t weight_desc;
+    CHECK_CUDNN(cudnnCreateFilterDescriptor(&weight_desc));
+    CHECK_CUDNN(cudnnSetFilterNdDescriptor(weight_desc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, weight_dims.size(),
+                                           weight_dims.data()));
+    return weight_desc;
+}
+
+inline void destroy_filter_descriptor(cudnnFilterDescriptor_t filter_desc) {
+    CHECK_CUDNN(cudnnDestroyFilterDescriptor(filter_desc));
+}
+
+inline cudnnConvolutionDescriptor_t create_convolution_descriptor(const std::vector<int> &stride,
+                                                                  const std::vector<int> &padding,
+                                                                  const std::vector<int> &dilation) {
+    cudnnConvolutionDescriptor_t conv_desc;
+    CHECK_CUDNN(cudnnCreateConvolutionDescriptor(&conv_desc));
+    CHECK_CUDNN(cudnnSetConvolutionNdDescriptor(conv_desc, padding.size(), padding.data(), stride.data(),
+                                                dilation.data(), CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT));
+    return conv_desc;
+}
+
+inline void destroy_convolution_descriptor(cudnnConvolutionDescriptor_t conv_desc) {
+    CHECK_CUDNN(cudnnDestroyConvolutionDescriptor(conv_desc));
+}
+
+torch::Tensor conv_backward_input(torch::Tensor grad_output, torch::Tensor input, torch::Tensor weight,
+                                  const std::vector<int> &stride, const std::vector<int> &padding,
+                                  const std::vector<int> &dilation) {
+    torch::Tensor grad_input = torch::empty_like(input);
+
+    cudnnHandle_t handle = at::native::getCudnnHandle();
+
+    cudnnConvolutionDescriptor_t conv_desc = create_convolution_descriptor(stride, padding, dilation);
+
+    cudnnTensorDescriptor_t grad_output_desc = create_tensor_descriptor(grad_output);
+    cudnnFilterDescriptor_t weight_desc = create_filter_descriptor(weight);
+    cudnnTensorDescriptor_t grad_input_desc = create_tensor_descriptor(grad_input);
+
+    cudnnConvolutionBwdDataAlgo_t algo = CUDNN_CONVOLUTION_BWD_DATA_ALGO_1;
+
+    size_t workspace_size;
+    CHECK_CUDNN(cudnnGetConvolutionBackwardDataWorkspaceSize(handle, weight_desc, grad_output_desc, conv_desc,
+                                                             grad_input_desc, algo, &workspace_size));
+    auto workspace = c10::cuda::CUDACachingAllocator::get()->allocate(workspace_size);
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    CHECK_CUDNN(cudnnConvolutionBackwardData(handle, &alpha, weight_desc, weight.const_data_ptr<float>(),
+                                             grad_output_desc, grad_output.const_data_ptr<float>(), conv_desc, algo,
+                                             workspace.get(), workspace_size, &beta, grad_input_desc,
+                                             grad_input.mutable_data_ptr<float>()));
+
+    destroy_convolution_descriptor(conv_desc);
+
+    destroy_tensor_descriptor(grad_output_desc);
+    destroy_filter_descriptor(weight_desc);
+    destroy_tensor_descriptor(grad_input_desc);
+
+    return grad_input;
+}
+
+torch::Tensor conv_backward_weight(torch::Tensor grad_output, torch::Tensor input, torch::Tensor weight,
+                                   const std::vector<int> &stride, const std::vector<int> &padding,
+                                   const std::vector<int> &dilation) {
+    torch::Tensor grad_weight = torch::empty_like(weight);
+
+    cudnnHandle_t handle = at::native::getCudnnHandle();
+
+    cudnnConvolutionDescriptor_t conv_desc = create_convolution_descriptor(stride, padding, dilation);
+
+    cudnnTensorDescriptor_t grad_output_desc = create_tensor_descriptor(grad_output);
+    cudnnTensorDescriptor_t input_desc = create_tensor_descriptor(input);
+    cudnnFilterDescriptor_t grad_weight_desc = create_filter_descriptor(grad_weight);
+
+    cudnnConvolutionBwdFilterAlgo_t algo = CUDNN_CONVOLUTION_BWD_FILTER_ALGO_1;
+
+    size_t workspace_size;
+    CHECK_CUDNN(cudnnGetConvolutionBackwardFilterWorkspaceSize(handle, input_desc, grad_output_desc, conv_desc,
+                                                               grad_weight_desc, algo, &workspace_size));
+    auto workspace = c10::cuda::CUDACachingAllocator::get()->allocate(workspace_size);
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+
+    CHECK_CUDNN(cudnnConvolutionBackwardFilter(handle, &alpha, input_desc, input.const_data_ptr<float>(),
+                                               grad_output_desc, grad_output.const_data_ptr<float>(), conv_desc, algo,
+                                               workspace.get(), workspace_size, &beta, grad_weight_desc,
+                                               grad_weight.mutable_data_ptr<float>()));
+
+    destroy_convolution_descriptor(conv_desc);
+
+    destroy_tensor_descriptor(grad_output_desc);
+    destroy_tensor_descriptor(input_desc);
+    destroy_filter_descriptor(grad_weight_desc);
+
+    return grad_weight;
+}
+
+torch::Tensor conv_backward_bias(torch::Tensor grad_output, torch::Tensor input, torch::Tensor weight,
+                                 const std::vector<int> &stride, const std::vector<int> &padding,
+                                 const std::vector<int> &dilation) {
+    std::vector<long> bias_dims(weight.ndimension(), 1);
+    bias_dims.at(1) = weight.size(0); // set channel
+    torch::Tensor grad_bias = torch::empty(bias_dims, weight.options());
+
+    cudnnHandle_t handle = at::native::getCudnnHandle();
+
+    cudnnConvolutionDescriptor_t conv_desc = create_convolution_descriptor(stride, padding, dilation);
+
+    cudnnTensorDescriptor_t grad_output_desc = create_tensor_descriptor(grad_output);
+    cudnnFilterDescriptor_t weight_desc = create_filter_descriptor(weight);
+    cudnnTensorDescriptor_t grad_bias_desc = create_tensor_descriptor(grad_bias);
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    CHECK_CUDNN(cudnnConvolutionBackwardBias(handle, &alpha, grad_output_desc, grad_output.const_data_ptr<float>(),
+                                             &beta, grad_bias_desc, grad_bias.mutable_data_ptr<float>()));
+
+    destroy_convolution_descriptor(conv_desc);
+
+    destroy_tensor_descriptor(grad_output_desc);
+    destroy_filter_descriptor(weight_desc);
+
+    return grad_bias.view({grad_bias.size(1)});
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+conv_backward(torch::Tensor grad_output, torch::Tensor input, torch::Tensor weight, const std::vector<int> &stride,
+              const std::vector<int> &padding, const std::vector<int> &dilation, std::array<bool, 3> output_mask) {
+    torch::Tensor grad_input;
+    if (output_mask[0]) {
+        grad_input = conv_backward_input(grad_output, input, weight, stride, padding, dilation);
+    }
+
+    torch::Tensor grad_weight;
+    if (output_mask[1]) {
+        grad_weight = conv_backward_weight(grad_output, input, weight, stride, padding, dilation);
+    }
+
+    torch::Tensor grad_bias;
+    if (output_mask[2]) {
+        grad_bias = conv_backward_bias(grad_output, input, weight, stride, padding, dilation);
+    }
+
+    return std::make_tuple(grad_input, grad_weight, grad_bias);
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+conv1d_backward(torch::Tensor grad_output, torch::Tensor input, torch::Tensor weight, const std::vector<int> &stride,
+                const std::vector<int> &padding, const std::vector<int> &dilation, std::array<bool, 3> output_mask) {
+    auto [grad_input, grad_weight, grad_bias] =
+        conv_backward(grad_output.unsqueeze(-2), input.unsqueeze(-2), weight.unsqueeze(-2), {1, stride.at(0)},
+                      {0, padding.at(0)}, {1, dilation.at(0)}, output_mask);
+
+    if (output_mask[0]) {
+        grad_input.squeeze_(-2);
+    }
+    if (output_mask[1]) {
+        grad_weight.squeeze_(-2);
+    }
+
+    return std::make_tuple(grad_input, grad_weight, grad_bias);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("conv3d", &convnd, "conv3d using cudnn");
     m.def("conv2d", &conv2d, "conv2d using cudnn");
     m.def("conv1d", &conv1d, "conv1d using cudnn");
+    m.def("conv1d_backward", &conv1d_backward, "conv1d_backward using cudnn");
+    m.def("conv2d_backward", &conv_backward, "conv2d_backward using cudnn");
+    m.def("conv3d_backward", &conv_backward, "conv3d_backward using cudnn");
 }

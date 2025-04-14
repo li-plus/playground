@@ -1,8 +1,6 @@
 """
 Reference:
 * https://github.com/ray-project/ray/blob/master/doc/source/serve/doc_code/vllm_example.py
-* https://github.com/ray-project/ray/blob/master/doc/source/serve/doc_code/vllm_openai_example.py
-* https://docs.ray.io/en/latest/serve/tutorials/vllm-example.html
 """
 
 import concurrent.futures
