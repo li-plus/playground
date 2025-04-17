@@ -265,7 +265,7 @@ torch::Tensor conv_backward_weight(torch::Tensor grad_output, torch::Tensor inpu
     auto input_desc = make_unique_tensor_descriptor(input);
     auto grad_weight_desc = make_unique_filter_descriptor(grad_weight);
 
-    cudnnConvolutionBwdFilterAlgo_t algo = CUDNN_CONVOLUTION_BWD_FILTER_ALGO_0;
+    cudnnConvolutionBwdFilterAlgo_t algo = CUDNN_CONVOLUTION_BWD_FILTER_ALGO_1;
 
     size_t workspace_size;
     CHECK_CUDNN(cudnnGetConvolutionBackwardFilterWorkspaceSize(handle, input_desc.get(), grad_output_desc.get(),
@@ -355,8 +355,9 @@ torch::Tensor conv_transpose_forward(torch::Tensor input, torch::Tensor weight, 
 
     torch::Tensor output = conv_backward_input(input, output_dims, weight, stride, padding, dilation);
     if (bias) {
-        // at::native::reshape_bias(bias);
-        // reshape_bias
+        std::vector<long> bias_dims(output.ndimension(), 1);
+        bias_dims.at(1) = bias->numel();
+        output.add_(bias->view(bias_dims));
     }
     return output;
 }
