@@ -66,7 +66,9 @@ class CustomConvTranspose1d(nn.ConvTranspose1d):
         super().__init__(*args, **kwargs)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return conv_ops.conv_transpose_forward(input, self.weight, self.bias, self.stride, self.padding, self.dilation)
+        return conv_ops.conv_transpose_forward(
+            input, self.weight, self.bias, self.stride, self.padding, self.output_padding, self.dilation
+        )
 
 
 class CustomConvTranspose2d(nn.ConvTranspose2d):
@@ -74,7 +76,9 @@ class CustomConvTranspose2d(nn.ConvTranspose2d):
         super().__init__(*args, **kwargs)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return conv_ops.conv_transpose_forward(input, self.weight, self.bias, self.stride, self.padding, self.dilation)
+        return conv_ops.conv_transpose_forward(
+            input, self.weight, self.bias, self.stride, self.padding, self.output_padding, self.dilation
+        )
 
 
 class CustomConvTranspose3d(nn.ConvTranspose3d):
@@ -82,7 +86,9 @@ class CustomConvTranspose3d(nn.ConvTranspose3d):
         super().__init__(*args, **kwargs)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return conv_ops.conv_transpose_forward(input, self.weight, self.bias, self.stride, self.padding, self.dilation)
+        return conv_ops.conv_transpose_forward(
+            input, self.weight, self.bias, self.stride, self.padding, self.output_padding, self.dilation
+        )
 
 
 @pytest.mark.parametrize(
@@ -100,8 +106,13 @@ class CustomConvTranspose3d(nn.ConvTranspose3d):
 def test_conv(cls_ref, cls_opt, input_shape, bias, check_backward):
     input_ref = torch.randn(input_shape, device="cuda", requires_grad=True)
     input_opt = input_ref.detach().requires_grad_()
-    model_ref = cls_ref(8, 16, kernel_size=3, stride=2, padding=1, dilation=3, bias=bias, device="cuda")
-    model_opt = cls_opt(8, 16, kernel_size=3, stride=2, padding=1, dilation=3, bias=bias, device="cuda")
+
+    kwargs = {}
+    if cls_ref in (nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d):
+        kwargs.update(output_padding=1)
+
+    model_ref = cls_ref(8, 16, kernel_size=3, stride=2, padding=1, dilation=3, **kwargs, bias=bias, device="cuda")
+    model_opt = cls_opt(8, 16, kernel_size=3, stride=2, padding=1, dilation=3, **kwargs, bias=bias, device="cuda")
     model_opt.load_state_dict(model_ref.state_dict())
 
     output_ref = model_ref(input_ref)

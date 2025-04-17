@@ -345,11 +345,11 @@ conv_backward(torch::Tensor grad_output, torch::Tensor input, torch::Tensor weig
 
 torch::Tensor conv_transpose_forward(torch::Tensor input, torch::Tensor weight, std::optional<torch::Tensor> bias,
                                      const std::vector<int> &stride, const std::vector<int> &padding,
-                                     const std::vector<int> &dilation) {
+                                     const std::vector<int> &output_padding, const std::vector<int> &dilation) {
     std::vector<long> output_dims{input.size(0), weight.size(1)};
     for (size_t i = 0; i < stride.size(); i++) {
-        const long output_dim =
-            (input.size(i + 2) - 1) * stride[i] + dilation[i] * (weight.size(i + 2) - 1) + 1 - 2 * padding[i];
+        const long output_dim = (input.size(i + 2) - 1) * stride[i] + dilation[i] * (weight.size(i + 2) - 1) + 1 -
+                                2 * padding[i] + output_padding[i];
         output_dims.emplace_back(output_dim);
     }
 
