@@ -102,7 +102,13 @@ torch::Tensor conv2d_forward(torch::Tensor input, torch::Tensor weight, std::opt
     const float *weight_ptr = weight.const_data_ptr<float>();
     float *output_ptr = output.mutable_data_ptr<float>();
 
-    cudnnConvolutionFwdAlgo_t algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM;
+    const int algo_count = CUDNN_CONVOLUTION_FWD_ALGO_COUNT;
+    cudnnConvolutionFwdAlgoPerf_t perfs[algo_count];
+    int returned_algo_count;
+    CHECK_CUDNN(cudnnGetConvolutionForwardAlgorithm_v7(handle, input_desc, weight_desc, conv_desc, output_desc,
+                                                       algo_count, &returned_algo_count, perfs));
+    TORCH_CHECK_GT(returned_algo_count, 0);
+    cudnnConvolutionFwdAlgo_t algo = perfs[0].algo;
 
     size_t workspace_size;
     CHECK_CUDNN(cudnnGetConvolutionForwardWorkspaceSize(handle, input_desc, weight_desc, conv_desc, output_desc, algo,
@@ -151,7 +157,7 @@ torch::Tensor conv_forward(torch::Tensor input, torch::Tensor weight, std::optio
         return output.squeeze(-2);
     }
 
-    if (input.ndimension() == 2) {
+    if (input.ndimension() == 4) {
         return conv2d_forward(input, weight, bias, stride, padding, dilation);
     }
 
@@ -175,7 +181,13 @@ torch::Tensor conv_forward(torch::Tensor input, torch::Tensor weight, std::optio
     const float *weight_ptr = weight.const_data_ptr<float>();
     float *output_ptr = output.mutable_data_ptr<float>();
 
-    cudnnConvolutionFwdAlgo_t algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM;
+    const int algo_count = CUDNN_CONVOLUTION_FWD_ALGO_COUNT;
+    cudnnConvolutionFwdAlgoPerf_t perfs[algo_count];
+    int returned_algo_count;
+    CHECK_CUDNN(cudnnGetConvolutionForwardAlgorithm_v7(handle, input_desc.get(), weight_desc.get(), conv_desc.get(),
+                                                       output_desc.get(), algo_count, &returned_algo_count, perfs));
+    TORCH_CHECK_GT(returned_algo_count, 0);
+    cudnnConvolutionFwdAlgo_t algo = perfs[0].algo;
 
     size_t workspace_size;
     CHECK_CUDNN(cudnnGetConvolutionForwardWorkspaceSize(handle, input_desc.get(), weight_desc.get(), conv_desc.get(),
@@ -234,7 +246,14 @@ torch::Tensor conv_backward_input(torch::Tensor grad_output, c10::IntArrayRef in
     auto weight_desc = make_unique_filter_descriptor(weight);
     auto grad_input_desc = make_unique_tensor_descriptor(grad_input);
 
-    cudnnConvolutionBwdDataAlgo_t algo = CUDNN_CONVOLUTION_BWD_DATA_ALGO_0;
+    const int algo_count = CUDNN_CONVOLUTION_BWD_DATA_ALGO_COUNT;
+    cudnnConvolutionBwdDataAlgoPerf_t perfs[algo_count];
+    int returned_algo_count;
+    CHECK_CUDNN(cudnnGetConvolutionBackwardDataAlgorithm_v7(handle, weight_desc.get(), grad_output_desc.get(),
+                                                            conv_desc.get(), grad_input_desc.get(), algo_count,
+                                                            &returned_algo_count, perfs));
+    TORCH_CHECK_GT(returned_algo_count, 0);
+    cudnnConvolutionBwdDataAlgo_t algo = perfs[0].algo;
 
     size_t workspace_size;
     CHECK_CUDNN(cudnnGetConvolutionBackwardDataWorkspaceSize(handle, weight_desc.get(), grad_output_desc.get(),
@@ -265,7 +284,14 @@ torch::Tensor conv_backward_weight(torch::Tensor grad_output, torch::Tensor inpu
     auto input_desc = make_unique_tensor_descriptor(input);
     auto grad_weight_desc = make_unique_filter_descriptor(grad_weight);
 
-    cudnnConvolutionBwdFilterAlgo_t algo = CUDNN_CONVOLUTION_BWD_FILTER_ALGO_1;
+    const int algo_count = CUDNN_CONVOLUTION_BWD_FILTER_ALGO_COUNT;
+    cudnnConvolutionBwdFilterAlgoPerf_t perfs[algo_count];
+    int returned_algo_count;
+    CHECK_CUDNN(cudnnGetConvolutionBackwardFilterAlgorithm_v7(handle, input_desc.get(), grad_output_desc.get(),
+                                                              conv_desc.get(), grad_weight_desc.get(), algo_count,
+                                                              &returned_algo_count, perfs));
+    TORCH_CHECK_GT(returned_algo_count, 0);
+    cudnnConvolutionBwdFilterAlgo_t algo = perfs[0].algo;
 
     size_t workspace_size;
     CHECK_CUDNN(cudnnGetConvolutionBackwardFilterWorkspaceSize(handle, input_desc.get(), grad_output_desc.get(),

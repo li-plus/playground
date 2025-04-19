@@ -2,8 +2,9 @@ import pytest
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.cpp_extension
+from torch.utils.benchmark import Timer
 
-debug = True
+debug = False
 extra_cflags = ["-Og", "-g"] if debug else ["-O3"]
 extra_cuda_cflags = ["-O0", "-lineinfo"] if debug else ["-O3"]
 
@@ -119,14 +120,22 @@ def test_conv(cls_ref, cls_opt, input_shape, bias, check_backward):
     output_opt = model_opt(input_opt)
     torch.testing.assert_close(output_opt, output_ref)
 
+    fwd_ref = Timer("model_ref(input_ref)", globals=locals()).timeit(10).mean * 1e6
+    fwd_opt = Timer("model_opt(input_opt)", globals=locals()).timeit(10).mean * 1e6
+    print(f"{cls_ref.__name__} forward: ref {fwd_ref:.2f} us, opt {fwd_opt:.2f} us")
+
     if not check_backward:
         return
 
     grad_output = torch.randn_like(output_ref)
-    output_ref.backward(grad_output)
-    output_opt.backward(grad_output)
+    output_ref.backward(grad_output, retain_graph=True)
+    output_opt.backward(grad_output, retain_graph=True)
 
     torch.testing.assert_close(input_opt.grad, input_ref.grad, rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(model_opt.weight.grad, model_ref.weight.grad, rtol=1e-3, atol=1e-3)
     if bias:
         torch.testing.assert_close(model_opt.bias.grad, model_ref.bias.grad, rtol=1e-3, atol=1e-3)
+
+    bwd_ref = Timer("output_ref.backward(grad_output, retain_graph=True)", globals=locals()).timeit(10).mean * 1e6
+    bwd_opt = Timer("output_opt.backward(grad_output, retain_graph=True)", globals=locals()).timeit(10).mean * 1e6
+    print(f"{cls_ref.__name__} backward: ref {bwd_ref:.2f} us, opt {bwd_opt:.2f} us")
