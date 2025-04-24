@@ -31,9 +31,9 @@ async def coroutine_pool():
     async def worker_fn(worker_id: int, queue: asyncio.Queue):
         while True:
             delay = await queue.get()
-            print(f"[worker {worker_id}] sleeping for {delay:.3f}s")
             try:
                 await asyncio.sleep(delay)
+                print(f"[worker {worker_id}] worked for {delay:.3f}s")
             finally:
                 queue.task_done()
 
@@ -88,8 +88,22 @@ async def streaming_processing():
     await asyncio.gather(*workers, return_exceptions=True)
 
 
+async def sync_to_async():
+    def sync_task(delay):
+        print("Starting a slow sync task...")
+        time.sleep(delay)  # Simulating a long task
+        print("Finished the slow task.")
+        return f"Done within {delay} seconds."
+
+    delay = 5
+    loop = asyncio.get_running_loop()
+    ret = await loop.run_in_executor(None, sync_task, delay)
+    print(ret)
+
+
 if __name__ == "__main__":
     # asyncio.run(hello_world())
     # asyncio.run(work_concurrent())
     # asyncio.run(coroutine_pool())
-    asyncio.run(streaming_processing())
+    # asyncio.run(streaming_processing())
+    asyncio.run(sync_to_async())
