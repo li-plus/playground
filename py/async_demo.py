@@ -4,8 +4,11 @@ tutorial: https://medium.com/@moraneus/mastering-pythons-asyncio-a-practical-gui
 """
 
 import asyncio
+import os
 import random
 import time
+
+os.environ.update({"RAY_DEDUP_LOGS": "0"})
 
 
 async def hello_world():
@@ -101,9 +104,42 @@ async def sync_to_async():
     print(ret)
 
 
+async def async_ray_task():
+    # https://docs.ray.io/en/latest/ray-core/actors/async_api.html
+    import ray
+
+    ray.init()
+
+    @ray.remote(num_cpus=os.cpu_count() // 4)
+    def remote_task(i, delay):
+        time.sleep(delay)
+        print(f"[task {i}] done within {delay:.3f} seconds")
+
+    num_tasks = 100
+    tasks = [remote_task.remote(i=i, delay=random.random()) for i in range(num_tasks)]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def async_ray_actor():
+    import ray
+
+    ray.init()
+
+    @ray.remote(num_cpus=os.cpu_count() // 4)
+    class Actor:
+        async def run(self, delay):
+            await asyncio.sleep(delay)
+            print(f"worked for {delay} seconds")
+
+    worker = Actor.remote()
+    await asyncio.gather(worker.run.remote(3), worker.run.remote(3), return_exceptions=True)
+
+
 if __name__ == "__main__":
     # asyncio.run(hello_world())
     # asyncio.run(work_concurrent())
     # asyncio.run(coroutine_pool())
     # asyncio.run(streaming_processing())
-    asyncio.run(sync_to_async())
+    # asyncio.run(sync_to_async())
+    # asyncio.run(async_ray_task())
+    asyncio.run(async_ray_actor())
