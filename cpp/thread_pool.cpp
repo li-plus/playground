@@ -80,22 +80,34 @@ inline std::string get_time() {
 int main() {
     const int num_tasks = 100;
 
-    std::vector<std::future<void>> results;
+    std::vector<std::future<std::string>> results;
     results.reserve(num_tasks);
 
     ThreadPool pool(8);
     for (int i = 0; i < num_tasks; i++) {
         auto result = pool.submit([i] {
-            int ms = rand() % 1000;
+            const int ms = rand() % 1000;
             std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 
-            std::cout << get_time() << " task " << i << " finished within " << ms << " ms" << std::endl;
+            std::ostringstream oss;
+            if (rand() % 2 == 0) {
+                oss << get_time() << " task " << i << " failed within " << ms << " ms";
+                throw std::runtime_error(oss.str());
+            } else {
+                oss << get_time() << " task " << i << " finished within " << ms << " ms";
+            }
+            return oss.str();
         });
         results.emplace_back(std::move(result));
     }
 
     for (auto &result : results) {
-        result.get();
+        try {
+            const std::string msg = result.get();
+            std::cout << msg << std::endl;
+        } catch (const std::exception &e) {
+            std::cout << e.what() << std::endl;
+        }
     }
     std::cout << get_time() << " all tasks completed" << std::endl;
 
