@@ -1,6 +1,8 @@
-TARGETS := finite init move optional avx float asm int4_unpack
+TARGETS := finite init move optional avx float asm int4_unpack thread_pool
 
-CXXFLAGS := -std=c++17 -mavx -O2
+CXXFLAGS := -std=c++17 -mavx -O2 -g
+
+LIBS := -pthread
 
 TARGET_DIR := ./build
 
@@ -10,7 +12,7 @@ all: $(TARGETS)
 
 $(TARGET_DIR)/%: %.cpp
 	mkdir -p $(TARGET_DIR)
-	$(CXX) $(CXXFLAGS) $< -o $@
+	$(CXX) $(CXXFLAGS) $(LIBS) $< -o $@
 
 $(TARGET_DIR)/%.s: %.cpp
 	mkdir -p $(TARGET_DIR)
