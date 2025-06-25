@@ -1,9 +1,12 @@
+import logging
 import queue
 import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import chain
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
 def simple_thread():
@@ -12,6 +15,25 @@ def simple_thread():
         print(f"Task finished within {sec} seconds")
 
     threads = [threading.Thread(target=worker, args=(i + 1,)) for i in range(3)]
+
+    for t in threads:
+        t.start()
+
+    for t in threads:
+        t.join()
+
+
+def thread_with_lock():
+    def worker(i):
+        logging.info(f"worker {i} before critical section")
+        with lock:
+            logging.info(f"worker {i} entered critical section")
+            time.sleep(1)
+        logging.info(f"worker {i} exited critical section")
+
+    lock = threading.Lock()
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(5)]
 
     for t in threads:
         t.start()
@@ -49,7 +71,7 @@ def producer_consumer():
             time.sleep(sec)
             print(f"Consumed task {task_id} within {sec:.2f} seconds")
 
-    q = queue.Queue(maxsize=10)
+    q = queue.Queue(maxsize=10)  # read queue.Queue source code to understand threading.Condition!
     task_counter = AtomicCounter()
 
     producers = [threading.Thread(target=producer) for _ in range(10)]
@@ -76,5 +98,6 @@ def thread_pool():
 
 if __name__ == "__main__":
     # simple_thread()
+    thread_with_lock()
     # producer_consumer()
-    thread_pool()
+    # thread_pool()
