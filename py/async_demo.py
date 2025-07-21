@@ -4,8 +4,10 @@ tutorial: https://medium.com/@moraneus/mastering-pythons-asyncio-a-practical-gui
 """
 
 import asyncio
+import concurrent.futures
 import os
 import random
+import threading
 import time
 
 os.environ.update({"RAY_DEDUP_LOGS": "0"})
@@ -104,6 +106,22 @@ async def sync_to_async():
     print(ret)
 
 
+async def concurrent_to_async():
+    def thread_worker(fut: concurrent.futures.Future, workload: float):
+        print(f"Thread started {workload=}")
+        time.sleep(workload)
+        fut.set_result(workload)
+        print("Thread finished")
+
+    fut = concurrent.futures.Future()
+    threading.Thread(target=thread_worker, kwargs=dict(fut=fut, workload=3), daemon=True).start()
+
+    # chain concurrent future with asyncio future, so that we can interact with threads within coroutines
+    print("Awaiting future")
+    result = await asyncio.wrap_future(fut)
+    print(f"Future done: {result=}")
+
+
 async def async_ray_task():
     # https://docs.ray.io/en/latest/ray-core/actors/async_api.html
     import ray
@@ -141,5 +159,6 @@ if __name__ == "__main__":
     # asyncio.run(coroutine_pool())
     # asyncio.run(streaming_processing())
     # asyncio.run(sync_to_async())
+    asyncio.run(concurrent_to_async())
     # asyncio.run(async_ray_task())
-    asyncio.run(async_ray_actor())
+    # asyncio.run(async_ray_actor())
