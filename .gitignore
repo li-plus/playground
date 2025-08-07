@@ -25,3 +25,9 @@ compile_commands.json
 # logs
 wandb/
 *.pt.trace.json.gz
+
+# node
+node_modules/
+
+# macOS
+.DS_Store
