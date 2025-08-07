@@ -5,12 +5,19 @@ tutorial: https://medium.com/@moraneus/mastering-pythons-asyncio-a-practical-gui
 
 import asyncio
 import concurrent.futures
+import logging
 import os
 import random
 import threading
 import time
 
 os.environ.update({"RAY_DEDUP_LOGS": "0"})
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
 
 async def hello_world():
@@ -122,6 +129,22 @@ async def concurrent_to_async():
     print(f"Future done: {result=}")
 
 
+async def await_with_timeout():
+    async def sleep_5():
+        logging.info("sleep_5 started")
+        await asyncio.sleep(5)
+        logging.info("sleep_5 finished")  # will not print
+
+    try:
+        await asyncio.wait_for(sleep_5(), timeout=3)
+    except TimeoutError as e:
+        logging.error(f"{e!r}")
+    else:
+        assert False
+
+    await asyncio.sleep(3)
+
+
 async def async_ray_task():
     # https://docs.ray.io/en/latest/ray-core/actors/async_api.html
     import ray
@@ -159,6 +182,7 @@ if __name__ == "__main__":
     # asyncio.run(coroutine_pool())
     # asyncio.run(streaming_processing())
     # asyncio.run(sync_to_async())
-    asyncio.run(concurrent_to_async())
+    # asyncio.run(concurrent_to_async())
+    asyncio.run(await_with_timeout())
     # asyncio.run(async_ray_task())
     # asyncio.run(async_ray_actor())
