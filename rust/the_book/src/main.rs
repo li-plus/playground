@@ -313,33 +313,31 @@ fn basic_enum() {
     print_ip(&ipv4);
     print_ip(&ipv6);
 
-
-    fn plus_one(x: Option<i32>) -> Option<i32>{
+    fn plus_one(x: Option<i32>) -> Option<i32> {
         match x {
             None => None,
-            Some(i) => Some(i + 1)
+            Some(i) => Some(i + 1),
         }
     }
     assert_eq!(plus_one(Some(5)), Some(6));
     assert_eq!(plus_one(None), None);
 
-
     let dice_roll = 6;
     match dice_roll {
         1 => println!("You rolled a one!"),
         6 => println!("You rolled a six!"),
-        x => println!("You rolled a {x}!"), 
+        x => println!("You rolled a {x}!"),
     }
     match dice_roll {
         1 => println!("You rolled a one!"),
         2 => println!("You rolled a two!"),
-        _ => () // do nothing
+        _ => (), // do nothing
     }
 
     let value = Some(5);
     if let Some(x) = value {
         println!("The value is: {x}");
-    } else { 
+    } else {
         println!("The value is: None")
     }
 
@@ -354,6 +352,250 @@ fn basic_enum() {
     assert_eq!(minus_one(None), None);
 }
 
+fn basic_collections() {
+    // https://doc.rust-lang.org/book/ch08-00-common-collections.html
+    println!("===== collections =====");
+
+    let v: Vec<i32> = Vec::new();
+    assert!(v.is_empty());
+    let mut v = vec![1, 2, 3];
+    println!("{v:?}");
+    v.push(4);
+    v.push(5);
+    println!("{v:?}");
+
+    // indexing
+    let v1 = &v[1];
+    // let v100 = &v[100];     // panic
+    let v100 = v.get(100);
+    println!("&v[1] = {v1}");
+    println!("v.get(100) = {v100:?}");
+
+    for i in &mut v {
+        *i += 1;
+    }
+
+    for i in &v {
+        println!("{i}")
+    }
+
+    // strings
+    let s1 = String::from("tic");
+    let s2 = String::from("tac");
+    let s3 = String::from("toe");
+    let s_add = s1 + "-" + &s2 + "-" + &s3; // s1 is moved
+
+    let s1 = String::from("tic");
+    let s_fmt = format!("{s1}-{s2}-{s3}");
+    print!("s_add = {s_add}, s_fmt = {s_fmt}\n");
+
+    let x = String::from("hello 世界");
+    println!("&x[0..6] = {}", &x[0..6]);
+    // println!("{}", &x[0..7]);   // panic
+    println!("&x[0..9] = {}", &x[0..9]);
+    for c in x.chars() {
+        print!("{c}");
+    }
+    println!();
+    for c in x.bytes() {
+        print!("{c} ");
+    }
+    println!();
+
+    // hash map
+    use std::collections::HashMap;
+    let mut scores = HashMap::new();
+    scores.insert(String::from("Blue"), 10);
+    scores.insert(String::from("Yellow"), 50);
+
+    let team_name = String::from("Blue");
+    let score = scores.get(&team_name).copied().unwrap_or(0);
+    assert!(score == 10);
+
+    for (key, value) in &scores {
+        println!("{key}: {value}");
+    }
+
+    scores.insert(String::from("Blue"), 25); // update
+    println!("Updated scores: {scores:?}");
+
+    scores.entry(String::from("Blue")).or_insert(10); // nothing happens
+    scores.entry(String::from("Green")).or_insert(10); // Green inserted with value 10
+    println!("Scores after entry: {scores:?}");
+}
+
+fn basic_error_handling() {
+    println!("===== error handling =====");
+
+    // {
+    //     panic!("This is a panic message"); // panic! macro
+    // }
+
+    // {
+    //     let v = vec![1, 2, 3];
+    //     v[99]; // panic
+    // }
+
+    fn read_file() -> Result<String, std::io::Error> {
+        use std::fs::File;
+        use std::io::Read;
+
+        let mut f = match File::open("not_found.rs") {
+            Ok(file) => file,
+            Err(e) => return Err(e),
+        };
+        let mut content = String::new();
+        f.read_to_string(&mut content)?; // same as above but shorter
+        Ok(content)
+    }
+    let result = read_file();
+    println!("read_file: {result:?}");
+}
+
+fn basic_generic() {
+    println!("===== generic =====");
+
+    struct Point<T> {
+        x: T,
+        y: T,
+    }
+
+    impl<T> Point<T> {
+        fn x(&self) -> &T {
+            &self.x
+        }
+
+        fn y(&self) -> &T {
+            &self.y
+        }
+    }
+
+    impl Point<f32> {
+        fn distance(&self) -> f32 {
+            (self.x * self.x + self.y * self.y).sqrt()
+        }
+    }
+
+    let p = Point { x: 3.0, y: 4.0 };
+    assert!(*p.x() == 3.0);
+    assert!(*p.y() == 4.0);
+    assert!(p.distance() == 5.0);
+}
+
+fn basic_trait() {
+    println!("===== trait =====");
+
+    // trait is like interface in other languages
+    trait Summary {
+        // fn summarize(&self) -> String;
+
+        // default implementation
+        fn summarize(&self) -> String {
+            String::from("(Read more...)")
+        }
+    }
+
+    #[allow(unused)]
+    struct NewsArticle {
+        headline: String,
+        location: String,
+        author: String,
+        content: String,
+    }
+
+    impl Summary for NewsArticle {
+        fn summarize(&self) -> String {
+            format!("{}, by {} ({})", self.headline, self.author, self.location)
+        }
+    }
+
+    #[allow(unused)]
+    struct SocialPost {
+        username: String,
+        content: String,
+        reply: bool,
+        repost: bool,
+    }
+
+    impl Summary for SocialPost {
+        fn summarize(&self) -> String {
+            format!("{}: {}", self.username, self.content)
+        }
+    }
+
+    let post = SocialPost {
+        username: String::from("horse_ebooks"),
+        content: String::from("of course, as you probably already know, people"),
+        reply: false,
+        repost: false,
+    };
+    println!("1 new post: {}", post.summarize());
+
+    let article = NewsArticle {
+        headline: String::from("Penguins win the Stanley Cup Championship!"),
+        location: String::from("Pittsburgh, PA, USA"),
+        author: String::from("Iceburgh"),
+        content: String::from(
+            "The Pittsburgh Penguins once again are the best \
+             hockey team in the NHL.",
+        ),
+    };
+
+    println!("New article available! {}", article.summarize());
+
+    fn notify1(item: &impl Summary) {
+        println!("Breaking news! {}", item.summarize());
+    }
+    notify1(&article);
+
+    // bound syntax
+    fn notify2<T: Summary>(item: &T) {
+        println!("Breaking news! {}", item.summarize());
+    }
+    notify2(&article);
+
+    // multiple trait bounds
+    impl ToString for NewsArticle {
+        fn to_string(&self) -> String {
+            format!(
+                "NewsArticle(headline={:?}, author={:?}, location={:?}, content={:?})",
+                self.headline, self.author, self.location, self.content
+            )
+        }
+    }
+    fn notify3<T: Summary + ToString>(item: &T) {
+        println!("TLDR: {}. Object: {}", item.summarize(), item.to_string());
+    }
+    notify3(&article);
+}
+
+fn basic_lifetime() {
+    println!("===== lifetime =====");
+
+    // https://doc.rust-lang.org/book/ch10-03-lifetime-syntax.html#lifetime-annotations-in-function-signatures
+    fn longest<'a>(x: &'a str, y: &'a str) -> &'a str {
+        if x.len() > y.len() {
+            x
+        } else {
+            y
+        }
+    }
+
+    let string1 = String::from("abcd");
+    let result;
+    {
+        let string2 = String::from("xyz");
+        result = longest(&string1, &string2);
+        println!("The longest string is {}", result); // ok
+    }
+    // println!("The longest string is {}", result); // error[E0597]: `string2` does not live long enough
+
+    // life time elision rules: https://doc.rust-lang.org/book/ch10-03-lifetime-syntax.html#lifetime-elision
+
+    let s: &'static str = "I have a static lifetime."; // static lifetime
+    println!("{s}");
+}
+
 fn main() {
     basic_variables();
     basic_functions();
@@ -363,4 +605,9 @@ fn main() {
     basic_struct();
     basic_method();
     basic_enum();
+    basic_collections();
+    basic_error_handling();
+    basic_generic();
+    basic_trait();
+    basic_lifetime();
 }
