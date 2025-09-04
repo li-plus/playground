@@ -18,8 +18,10 @@ NVCC := nvcc
 
 all: $(TARGETS)
 
-$(TARGET_DIR)/%: %.cu common.h
+$(TARGET_DIR):
 	mkdir -p $(TARGET_DIR)
+
+$(TARGET_DIR)/%: %.cu common.h | $(TARGET_DIR)
 	$(NVCC) $(CUDAFLAGS) $(INCLUDES) $(LIBRARIES) $< -o $@
 
 .PHONY: lint clean
