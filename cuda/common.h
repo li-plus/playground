@@ -27,20 +27,20 @@ class LogMessageFatal {
 
 #define CHECK_CUDA(expr)                                                                                               \
     do {                                                                                                               \
-        cudaError_t status = (expr);                                                                                   \
+        const cudaError_t status = (expr);                                                                             \
         CHECK(status == cudaSuccess) << "cuda error: " << cudaGetErrorString(status);                                  \
     } while (false)
 
 #define CHECK_CUBLAS(expr)                                                                                             \
     do {                                                                                                               \
-        cublasStatus_t status = (expr);                                                                                \
+        const cublasStatus_t status = (expr);                                                                          \
         CHECK(status == CUBLAS_STATUS_SUCCESS)                                                                         \
             << "cublas error: [" << cublasGetStatusName(status) << "] " << cublasGetStatusString(status);              \
     } while (false)
 
 #define CHECK_CUDNN(expr)                                                                                              \
     do {                                                                                                               \
-        cudnnStatus_t status = (expr);                                                                                 \
+        const cudnnStatus_t status = (expr);                                                                           \
         CHECK(status == CUDNN_STATUS_SUCCESS) << "cudnn error: " << cudnnGetErrorString(status);                       \
     } while (false)
 
@@ -85,6 +85,21 @@ static inline void check_is_close(const half *a, const half *b, size_t n, float 
     for (size_t i = 0; i < n; i++) {
         CHECK(is_close((float)a[i], (float)b[i], atol, rtol)) << (float)a[i] << " vs " << (float)b[i];
     }
+}
+
+template <typename T>
+static inline void check_is_close_d(const T *d_a, const T *d_b, size_t n, float atol = 1e-5f, float rtol = 1e-8f) {
+    T *h_a, *h_b;
+    CHECK_CUDA(cudaMallocHost(&h_a, n * sizeof(T)));
+    CHECK_CUDA(cudaMallocHost(&h_b, n * sizeof(T)));
+
+    CHECK_CUDA(cudaMemcpy(h_a, d_a, n * sizeof(T), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_b, d_b, n * sizeof(T), cudaMemcpyDeviceToHost));
+
+    check_is_close(h_a, h_b, n, atol, rtol);
+
+    CHECK_CUDA(cudaFreeHost(h_a));
+    CHECK_CUDA(cudaFreeHost(h_b));
 }
 
 static inline int ceil_div(int a, int b) { return (a + b - 1) / b; }

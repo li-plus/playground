@@ -7,6 +7,17 @@ Usage: mpirun -np 8 bin/ipc
 #include <mpi.h>
 #include <vector>
 
+#define CHECK_MPI(call)                                                                                                \
+    do {                                                                                                               \
+        const int status = (call);                                                                                     \
+        if (status != MPI_SUCCESS) {                                                                                   \
+            char error_string[MPI_MAX_ERROR_STRING];                                                                   \
+            int error_length;                                                                                          \
+            MPI_Error_string(status, error_string, &error_length);                                                     \
+            THROW << "MPI error: " << error_string;                                                                    \
+        }                                                                                                              \
+    } while (false)
+
 // From https://github.com/NVIDIA/TensorRT-LLM/blob/main/cpp/tensorrt_llm/kernels/customAllReduceKernels.cu
 static inline __device__ void st_flag_release(uint32_t const &flag, uint32_t *flag_addr) {
 #if __CUDA_ARCH__ >= 700
@@ -65,11 +76,11 @@ void ipc_all_gather_cuda(const int *input, int **peers_output, uint32_t **peers_
 }
 
 int main(int argc, char **argv) {
-    MPI_Init(&argc, &argv);
+    CHECK_MPI(MPI_Init(&argc, &argv));
 
     int world_size, rank;
-    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &world_size));
+    CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
 
     printf("[rank %d] initialized world size %d\n", rank, world_size);
 
@@ -94,8 +105,8 @@ int main(int argc, char **argv) {
     // ipc mem
     std::vector<cudaIpcMemHandle_t> mem_handles(world_size);
     CHECK_CUDA(cudaIpcGetMemHandle(mem_handles.data() + rank, d_output_h_vec[rank]));
-    MPI_Allgather(mem_handles.data() + rank, sizeof(cudaIpcMemHandle_t), MPI_BYTE, mem_handles.data(),
-                  sizeof(cudaIpcMemHandle_t), MPI_BYTE, MPI_COMM_WORLD);
+    CHECK_MPI(MPI_Allgather(mem_handles.data() + rank, sizeof(cudaIpcMemHandle_t), MPI_BYTE, mem_handles.data(),
+                            sizeof(cudaIpcMemHandle_t), MPI_BYTE, MPI_COMM_WORLD));
     for (int i = 0; i < world_size; i++) {
         if (i != rank) {
             CHECK_CUDA(
@@ -108,8 +119,8 @@ int main(int argc, char **argv) {
         cudaMemcpyAsync(d_output_d_vec, d_output_h_vec.data(), world_size * sizeof(void *), cudaMemcpyHostToDevice));
 
     CHECK_CUDA(cudaIpcGetMemHandle(mem_handles.data() + rank, d_flag_h_vec[rank]));
-    MPI_Allgather(mem_handles.data() + rank, sizeof(cudaIpcMemHandle_t), MPI_BYTE, mem_handles.data(),
-                  sizeof(cudaIpcMemHandle_t), MPI_BYTE, MPI_COMM_WORLD);
+    CHECK_MPI(MPI_Allgather(mem_handles.data() + rank, sizeof(cudaIpcMemHandle_t), MPI_BYTE, mem_handles.data(),
+                            sizeof(cudaIpcMemHandle_t), MPI_BYTE, MPI_COMM_WORLD));
     for (int i = 0; i < world_size; i++) {
         if (i != rank) {
             CHECK_CUDA(cudaIpcOpenMemHandle((void **)&d_flag_h_vec[i], mem_handles[i], cudaIpcMemLazyEnablePeerAccess));
@@ -156,7 +167,7 @@ int main(int argc, char **argv) {
     printf("[rank %d] [cuda] elapsed %.3f us, (uni-directional) bus_bandwidth %.3f GB/s\n", rank, elapsed * 1e6f,
            bus_bandwidth);
 
-    MPI_Barrier(MPI_COMM_WORLD);
+    CHECK_MPI(MPI_Barrier(MPI_COMM_WORLD));
 
     // clean up
     for (int i = 0; i < world_size; i++) {
@@ -173,7 +184,7 @@ int main(int argc, char **argv) {
     CHECK_CUDA(cudaFree(d_flag_d_vec));
     CHECK_CUDA(cudaFreeHost(h_output_ref));
 
-    MPI_Finalize();
+    CHECK_MPI(MPI_Finalize());
 
     return 0;
 }
