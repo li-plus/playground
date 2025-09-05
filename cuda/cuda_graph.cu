@@ -1,4 +1,7 @@
 #include "common.h"
+#include <nvtx3/nvToolsExt.h>
+
+// #define NVTX_DISABLE
 
 __global__ void short_kernel(const float *d_in, float *d_out, int N) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -20,8 +23,13 @@ void work(const float *d_in, float *d_out, int N, int NUM_KERNELS, cudaStream_t 
     }
 }
 
+struct nvtx_scoped_range {
+    nvtx_scoped_range(const char *name) { nvtxRangePushA(name); }
+    ~nvtx_scoped_range() { nvtxRangePop(); }
+};
+
 int main() {
-    const int N = 1024;
+    const int N = 128;
     float *d_in, *d_ref, *d_out;
     CHECK_CUDA(cudaMalloc(&d_in, N * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&d_ref, N * sizeof(float)));
@@ -31,7 +39,13 @@ int main() {
 
     const int NUM_KERNELS = 2048;
 
-    const float naive_cost = timeit([=] { work(d_in, d_ref, N, NUM_KERNELS, cudaStreamDefault); }, 2, 10);
+    const float naive_cost = timeit(
+        [=] {
+            nvtx_scoped_range marker("naive");
+            work(d_in, d_ref, N, NUM_KERNELS, cudaStreamDefault);
+            CHECK_CUDA(cudaStreamSynchronize(cudaStreamDefault));
+        },
+        2, 10);
 
     cudaStream_t stream;
     CHECK_CUDA(cudaStreamCreate(&stream));
@@ -42,7 +56,13 @@ int main() {
     CHECK_CUDA(cudaStreamEndCapture(stream, &graph));
     CHECK_CUDA(cudaGraphInstantiate(&instance, graph, NULL, NULL, 0));
 
-    const float graph_cost = timeit([&] { CHECK_CUDA(cudaGraphLaunch(instance, cudaStreamDefault)); }, 2, 10);
+    const float graph_cost = timeit(
+        [&] {
+            nvtx_scoped_range marker("optimized");
+            CHECK_CUDA(cudaGraphLaunch(instance, cudaStreamDefault));
+            CHECK_CUDA(cudaStreamSynchronize(cudaStreamDefault));
+        },
+        2, 10);
 
     check_is_close_d(d_ref, d_out, N);
 
