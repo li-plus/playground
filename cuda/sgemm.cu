@@ -142,13 +142,15 @@ each sub-tiles, one thread only handles 16 bytes at a time.
            Block A                 Block C
     */
 
-    constexpr int NUM_THREADS = (BM / TM) * (BN / TN);
+    constexpr int BX = BN / TN; // blockDim.x
+    constexpr int BY = BM / TM; // blockDim.y
+    constexpr int NUM_THREADS = BY * BX;
 
     const int bx = blockIdx.x;
     const int by = blockIdx.y;
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
-    const int tid = ty * blockDim.x + tx;
+    const int tid = ty * BX + tx;
 
     __shared__ float s_A[BM][BK];
     __shared__ float s_B[BK][BN];
@@ -225,9 +227,10 @@ each sub-tiles, one thread only handles 16 bytes at a time.
             }
 
             // load s_B tile into reg_B
+            // if TN > 4, split into sub-tiles to avoid bank conflict
 #pragma unroll
             for (int tn = 0; tn < TN; tn += 4) {
-                *(float4 *)&reg_B[tn] = *(float4 *)&s_B[tk][tx * TN + tn]; // bank conflict if TN > 4
+                *(float4 *)&reg_B[tn] = *(float4 *)&s_B[tk][tn * BX + tx * 4];
             }
 
             // outer product
@@ -251,8 +254,7 @@ each sub-tiles, one thread only handles 16 bytes at a time.
     for (int tm = 0; tm < TM; tm++) {
 #pragma unroll
         for (int tn = 0; tn < TN; tn += 4) {
-            *(float4 *)&C_block[(ty * TM + tm) * N + tx * TN + tn] =
-                *(float4 *)&sums[tm][tn]; // no memory coalesce if TN > 4
+            *(float4 *)&C_block[(ty * TM + tm) * N + tn * BX + tx * 4] = *(float4 *)&sums[tm][tn];
         }
     }
 }
