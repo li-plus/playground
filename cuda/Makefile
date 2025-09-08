@@ -1,4 +1,4 @@
-TARGETS := noop fuse memcpy reduce_sum reduce_sum_dim float4 sgemv hgemv sched coalesce transpose loop cache softmax gemm_bias_gelu vote sort conv sm_sched collatz cuda_graph
+TARGETS := noop fuse memcpy reduce_sum reduce_sum_dim float4 sgemm sgemv hgemv sched coalesce transpose loop cache softmax gemm_bias_gelu vote sort conv sm_sched collatz cuda_graph
 
 CUDAFLAGS := -std=c++17 -gencode arch=compute_80,code=sm_80 -O3 -lineinfo
 

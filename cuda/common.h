@@ -102,7 +102,7 @@ static inline void check_is_close_d(const T *d_a, const T *d_b, size_t n, float 
     CHECK_CUDA(cudaFreeHost(h_b));
 }
 
-static inline int ceil_div(int a, int b) { return (a + b - 1) / b; }
+static inline constexpr int ceil_div(int a, int b) { return (a + b - 1) / b; }
 
 static constexpr unsigned FULL_MASK = 0xffffffff;
 static constexpr int WARP_SIZE = 32;
