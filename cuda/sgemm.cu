@@ -372,22 +372,33 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
 
         static_assert(TN % 4 == 0, "unimplemented: TN is not multiple of 4");
 
-        float reg_A[TM];
-        float reg_B[TN];
+        int reg_read_idx = 0, reg_write_idx = 1;
+        float reg_A[2][TM];
+        float reg_B[2][TN];
 
-#pragma unroll
-        for (int tk = 0; tk < BK; tk++) {
-            // load s_A tile into reg_A
+        auto fetch_tile = [&](int tk) {
+        // load s_A tile into reg_A
 #pragma unroll
             for (int tm = 0; tm < TM; tm++) {
-                reg_A[tm] = s_A[read_idx][ty * TM + tm][tk]; // bank conflict
+                reg_A[reg_write_idx][tm] = s_A[read_idx][ty * TM + tm][tk]; // bank conflict
             }
 
             // load s_B tile into reg_B
             // if TN > 4, split into sub-tiles to avoid bank conflict
 #pragma unroll
             for (int tn = 0; tn < TN; tn += 4) {
-                *(float4 *)&reg_B[tn] = *(float4 *)&s_B[read_idx][tk][tn * BX + tx * 4];
+                *(float4 *)&reg_B[reg_write_idx][tn] = *(float4 *)&s_B[read_idx][tk][tn * BX + tx * 4];
+            }
+        };
+
+#pragma unroll
+        for (int tk = 0; tk < BK; tk++) {
+            if (tk == 0) {
+                fetch_tile(0);
+            }
+            swap(reg_read_idx, reg_write_idx);
+            if (tk < BK - 1) {
+                fetch_tile(tk + 1);
             }
 
             // outer product
@@ -395,7 +406,7 @@ __global__ void __launch_bounds__((BM / TM) * (BN / TN))
             for (int tm = 0; tm < TM; tm++) {
 #pragma unroll
                 for (int tn = 0; tn < TN; tn++) {
-                    sums[tm][tn] += reg_A[tm] * reg_B[tn];
+                    sums[tm][tn] += reg_A[reg_read_idx][tm] * reg_B[reg_read_idx][tn];
                 }
             }
         }
@@ -565,7 +576,7 @@ int main(int argc, char **argv) {
     // fixed K to avoid split-K kernels
     {
         constexpr int K = 1024;
-        const int dims[]{1024, 2048, 4096, 8192, 16384, 32768};
+        const int dims[]{1024, 2048, 4096, 8192, 16384};
         for (int d : dims) {
             perf(d, d, K);
         }
