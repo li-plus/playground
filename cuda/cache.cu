@@ -72,28 +72,28 @@ struct st_t {
 
 struct stwb_t {
     template <typename T>
-    __device__ T operator()(T *ptr, T value) {
+    __device__ void operator()(T *ptr, T value) {
         __stwb(ptr, value); // st.global.wb.v4.f32
     }
 };
 
 struct stcg_t {
     template <typename T>
-    __device__ T operator()(T *ptr, T value) {
+    __device__ void operator()(T *ptr, T value) {
         __stcg(ptr, value); // st.global.cg.v4.f32
     }
 };
 
 struct stcs_t {
     template <typename T>
-    __device__ T operator()(T *ptr, T value) {
+    __device__ void operator()(T *ptr, T value) {
         __stcs(ptr, value); // st.global.cs.v4.f32
     }
 };
 
 struct stwt_t {
     template <typename T>
-    __device__ T operator()(T *ptr, T value) {
+    __device__ void operator()(T *ptr, T value) {
         __stwt(ptr, value); // st.global.wt.v4.f32
     }
 };

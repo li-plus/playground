@@ -55,6 +55,7 @@ __global__ void transpose_coalesced_kernel(float *odata, const float *idata, int
         odata[(y + j) * M + x] = tile[threadIdx.x][threadIdx.y + j];
 }
 
+// https://forums.developer.nvidia.com/t/using-memcpy-async-in-matrix-transpose/281051
 __global__ void transpose_coalesced_async_cg_kernel(float *odata, const float *idata, int M, int N) {
     __shared__ float s_tile[TILE_DIM][TILE_DIM + 1]; // prevent bank conflict
 
@@ -128,6 +129,8 @@ __global__ void transpose_swizzle_async_pipeline_kernel(float *odata, const floa
 
     cuda::pipeline<cuda::thread_scope_thread> pipe = cuda::make_pipeline();
 
+    pipe.producer_acquire();
+
     for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS)
         cuda::memcpy_async(&tile[threadIdx.y + j][(threadIdx.y + j) ^ threadIdx.x], &idata[(y + j) * N + x],
                            sizeof(float), pipe);
@@ -142,6 +145,8 @@ __global__ void transpose_swizzle_async_pipeline_kernel(float *odata, const floa
 
     for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS)
         odata[(y + j) * M + x] = tile[threadIdx.x][threadIdx.x ^ (threadIdx.y + j)];
+
+    pipe.consumer_release();
 }
 
 #define make_launcher(launcher, kernel)                                                                                \

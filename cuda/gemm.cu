@@ -3,7 +3,6 @@
 
 #include "common.h"
 #include <functional>
-#include <iostream>
 #include <vector>
 
 __global__ void sgemm1_kernel(int M, int N, int K, const float *__restrict__ A, const float *__restrict__ B,

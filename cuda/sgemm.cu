@@ -343,7 +343,10 @@ void perf(int M, int N, int K) {
     PerfRecord best_record;
     PerfRecord cublas_record;
 
-    for (const auto &[name, fn] : kernels) {
+    for (const auto &item: kernels) {
+        const auto &name = std::get<0>(item);
+        const auto &fn = std::get<1>(item);
+
         float *C1, *C2;
         CHECK_CUDA(cudaMallocHost(&C1, M * N * sizeof(float)));
         CHECK_CUDA(cudaMallocHost(&C2, M * N * sizeof(float)));
