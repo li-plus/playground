@@ -33,7 +33,7 @@ __global__ void cg_memcpy_async_kernel(const float *__restrict__ input, float *_
     cg::thread_block group = cg::this_thread_block();
     __shared__ float s_buffer[1024];
     for (int i = 0; i < N; i += blockDim.x * gridDim.x * 4) {
-        cg::memcpy_async(group, s_buffer, input + i + bx * blockDim.x * 4, 1024 * sizeof(float));
+        cg::memcpy_async(group, (float4 *)s_buffer, (float4 *)&input[i + bx * blockDim.x * 4], 1024 * sizeof(float));
         cg::wait(group);
         *(float4 *)&output[i + (bx * blockDim.x + tx) * 4] = *(float4 *)&s_buffer[(blockDim.x - 1 - tx) * 4];
         __syncthreads();
@@ -54,7 +54,7 @@ __global__ void cuda_memcpy_async_kernel(const float *__restrict__ input, float 
     __shared__ float s_buffer[1024];
     for (int i = tid * 4; i < N; i += blockDim.x * gridDim.x * 4) {
         pipe.producer_acquire();
-        cuda::memcpy_async(&s_buffer[tx * 4], &input[i], sizeof(float4), pipe);
+        cuda::memcpy_async((float4 *)&s_buffer[tx * 4], (float4 *)&input[i], sizeof(float4), pipe);
         pipe.producer_commit();
 
         pipe.consumer_wait();

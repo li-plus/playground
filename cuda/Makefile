@@ -6,6 +6,10 @@ ifeq ($(VERBOSE), 1)
 	CUDAFLAGS += -Xptxas=-v
 endif
 
+ifeq ($(PTX), 1)
+	CUDAFLAGS += -ptx
+endif
+
 # INCLUDES := -I/usr/include/x86_64-linux-gnu/mpi
 INCLUDES := 
 
