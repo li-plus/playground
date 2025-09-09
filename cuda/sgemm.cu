@@ -4,6 +4,7 @@
 // CUTLASS docs: https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md
 
 #include "common.h"
+#include <cuda/pipeline>
 #include <functional>
 #include <vector>
 
@@ -161,7 +162,11 @@ each sub-tiles, one thread only handles 16 bytes at a time.
 
     float sums[TM][TN]{};
 
+    auto pipeline = cuda::make_pipeline();
+
     for (int k = 0; k < K; k += BK) {
+        pipeline.producer_acquire();
+
         // load BM * BK tile of A into shared memory
         {
             static_assert((BM * BK) % (NUM_THREADS * 4) == 0, "unimplemented: corrupted load of A");
@@ -172,7 +177,7 @@ each sub-tiles, one thread only handles 16 bytes at a time.
 #pragma unroll
             for (int y_start = 0; y_start < BM; y_start += A_LOAD_TILE_Y) {
                 const int y = y_start + tid / A_LOAD_TILE_X;
-                *(float4 *)&s_A[y][x] = *(float4 *)&A_block[y * K + x];
+                cuda::memcpy_async((float4 *)&s_A[y][x], (float4 *)&A_block[y * K + x], sizeof(float4), pipeline);
             }
         }
 
@@ -186,10 +191,13 @@ each sub-tiles, one thread only handles 16 bytes at a time.
 #pragma unroll
             for (int y_start = 0; y_start < BK; y_start += B_LOAD_TILE_Y) {
                 const int y = y_start + tid / B_LOAD_TILE_X;
-                *(float4 *)&s_B[y][x] = *(float4 *)&B_block[y * N + x];
+                cuda::memcpy_async((float4 *)&s_B[y][x], (float4 *)&B_block[y * N + x], sizeof(float4), pipeline);
             }
         }
 
+        pipeline.producer_commit();
+
+        pipeline.consumer_wait();
         __syncthreads();
 
 #ifdef SGEMM_DEBUG
@@ -243,6 +251,7 @@ each sub-tiles, one thread only handles 16 bytes at a time.
             }
         }
 
+        pipeline.consumer_release();
         __syncthreads();
 
         A_block += BK;
@@ -343,7 +352,7 @@ void perf(int M, int N, int K) {
     PerfRecord best_record;
     PerfRecord cublas_record;
 
-    for (const auto &item: kernels) {
+    for (const auto &item : kernels) {
         const auto &name = std::get<0>(item);
         const auto &fn = std::get<1>(item);
 
