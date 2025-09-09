@@ -285,6 +285,154 @@ void sgemm_v3(const float *A, const float *B, float *C, int M, int N, int K) {
     CHECK_CUDA(cudaGetLastError());
 }
 
+template <typename T>
+__device__ __forceinline__ void swap(T &a, T &b) {
+    T tmp = a;
+    a = b;
+    b = tmp;
+}
+
+// sgemm_v3 + prefetch
+template <int BM, int BN, int BK, int TM, int TN>
+__global__ void __launch_bounds__((BM / TM) * (BN / TN))
+    sgemm_v4_kernel(const float *__restrict__ A, const float *__restrict__ B, float *__restrict__ C, int M, int N,
+                    int K) {
+    constexpr int BX = BN / TN; // blockDim.x
+    constexpr int BY = BM / TM; // blockDim.y
+    constexpr int NUM_THREADS = BY * BX;
+
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int tid = ty * BX + tx;
+
+    __shared__ float s_A[2][BM][BK];
+    __shared__ float s_B[2][BK][BN];
+
+    int read_idx = 0;
+    int write_idx = 1;
+
+    const float *A_block = A + by * BM * K;
+    const float *B_block = B + bx * BN;
+    float *C_block = C + by * BM * N + bx * BN;
+
+    float sums[TM][TN]{};
+
+    auto pipeline = cuda::make_pipeline();
+
+    static_assert((BM * BK) % (NUM_THREADS * 4) == 0, "unimplemented: corrupted load of A");
+    static_assert(BK <= NUM_THREADS * 4, "unimplemented: BK is too large");
+    constexpr int A_LOAD_TILE_X = BK / 4;
+    constexpr int A_LOAD_TILE_Y = NUM_THREADS / A_LOAD_TILE_X;
+    const int A_x = tid % A_LOAD_TILE_X * 4;
+    const int A_y = tid / A_LOAD_TILE_X;
+
+    static_assert((BK * BN) % (NUM_THREADS * 4) == 0, "unimplemented: corrupted load of B");
+    static_assert(BN <= NUM_THREADS * 4, "unimplemented: BN is too large");
+    constexpr int B_LOAD_TILE_X = BN / 4;
+    constexpr int B_LOAD_TILE_Y = NUM_THREADS / B_LOAD_TILE_X;
+    const int B_x = tid % B_LOAD_TILE_X * 4;
+    const int B_y = tid / B_LOAD_TILE_X;
+
+    auto fetch_block = [&](const float *A_block, const float *B_block, int k) {
+    // load BM * BK tile of A into shared memory
+#pragma unroll
+        for (int y_start = 0; y_start < BM; y_start += A_LOAD_TILE_Y) {
+            const int y = y_start + A_y;
+            cuda::memcpy_async((float4 *)&s_A[write_idx][y][A_x], (float4 *)&A_block[y * K + A_x], sizeof(float4),
+                               pipeline);
+        }
+
+        // load BK * BN tile of B into shared memory
+#pragma unroll
+        for (int y_start = 0; y_start < BK; y_start += B_LOAD_TILE_Y) {
+            const int y = y_start + B_y;
+            cuda::memcpy_async((float4 *)&s_B[write_idx][y][B_x], (float4 *)&B_block[y * N + B_x], sizeof(float4),
+                               pipeline);
+        }
+    };
+
+    pipeline.producer_acquire();
+    fetch_block(A_block, B_block, 0);
+    pipeline.producer_commit();
+
+    for (int k = 0; k < K; k += BK) {
+        swap(read_idx, write_idx);
+
+        pipeline.consumer_wait();
+        __syncthreads(); // single sync is enough
+
+        // prefetch next block
+        if (k < K - BK) {
+            pipeline.producer_acquire();
+            fetch_block(A_block + BK, B_block + BK * N, k + 1);
+            pipeline.producer_commit();
+        }
+
+        static_assert(TN % 4 == 0, "unimplemented: TN is not multiple of 4");
+
+        float reg_A[TM];
+        float reg_B[TN];
+
+#pragma unroll
+        for (int tk = 0; tk < BK; tk++) {
+            // load s_A tile into reg_A
+#pragma unroll
+            for (int tm = 0; tm < TM; tm++) {
+                reg_A[tm] = s_A[read_idx][ty * TM + tm][tk]; // bank conflict
+            }
+
+            // load s_B tile into reg_B
+            // if TN > 4, split into sub-tiles to avoid bank conflict
+#pragma unroll
+            for (int tn = 0; tn < TN; tn += 4) {
+                *(float4 *)&reg_B[tn] = *(float4 *)&s_B[read_idx][tk][tn * BX + tx * 4];
+            }
+
+            // outer product
+#pragma unroll
+            for (int tm = 0; tm < TM; tm++) {
+#pragma unroll
+                for (int tn = 0; tn < TN; tn++) {
+                    sums[tm][tn] += reg_A[tm] * reg_B[tn];
+                }
+            }
+        }
+
+        pipeline.consumer_release();
+
+        A_block += BK;
+        B_block += BK * N;
+    }
+
+    // store sums to C
+#pragma unroll
+    for (int tm = 0; tm < TM; tm++) {
+#pragma unroll
+        for (int tn = 0; tn < TN; tn += 4) {
+            *(float4 *)&C_block[(ty * TM + tm) * N + tn * BX + tx * 4] = *(float4 *)&sums[tm][tn];
+        }
+    }
+}
+
+template <int BM = 32, int BN = 32, int BK = 32, int TM = 4, int TN = 4>
+void sgemm_v4(const float *A, const float *B, float *C, int M, int N, int K) {
+    CHECK(N % BN == 0 && M % BM == 0 && K % BK == 0) << "invalid matrix dimensions";
+
+    static_assert(BM % TM == 0 && BN % TN == 0);
+
+    constexpr int BLOCK_DIM_X = BN / TN;
+    constexpr int BLOCK_DIM_Y = BM / TM;
+    constexpr int NUM_THREADS = BLOCK_DIM_X * BLOCK_DIM_Y;
+    static_assert(32 <= NUM_THREADS && NUM_THREADS <= 1024);
+
+    dim3 grid_dim(N / BN, M / BM);
+    dim3 block_dim(BLOCK_DIM_X, BLOCK_DIM_Y);
+    sgemm_v4_kernel<BM, BN, BK, TM, TN><<<grid_dim, block_dim>>>(A, B, C, M, N, K);
+    CHECK_CUDA(cudaGetLastError());
+}
+
 void sgemm_cublas(cublasHandle_t handle, const float *A, const float *B, float *C, int M, int N, int K) {
     const float alpha = 1;
     const float beta = 0;
@@ -322,8 +470,7 @@ void perf(int M, int N, int K) {
     cublasHandle_t handle;
     CHECK_CUBLAS(cublasCreate(&handle));
 
-#define SGEMM_V3_ITEM(BM, BN, BK, TM, TN)                                                                              \
-    {"sgemm_v3_b" #BM "x" #BN "x" #BK "_t" #TM "x" #TN, sgemm_v3<BM, BN, BK, TM, TN>}
+#define MAKE_ITEM(...) {#__VA_ARGS__, __VA_ARGS__}
 
     std::vector<std::tuple<std::string, std::function<void(const float *, const float *, float *, int, int, int)>>>
         kernels{
@@ -331,14 +478,19 @@ void perf(int M, int N, int K) {
                                 int K) { sgemm_cublas(handle, A, B, C, M, N, K); }},
             // {"sgemm_v1", sgemm_v1},
             // {"sgemm_v2", sgemm_v2},
-            SGEMM_V3_ITEM(32, 32, 16, 4, 4),
-            SGEMM_V3_ITEM(32, 32, 32, 4, 4),
-            SGEMM_V3_ITEM(64, 64, 16, 4, 4),
-            SGEMM_V3_ITEM(64, 64, 32, 4, 4),
-            SGEMM_V3_ITEM(128, 128, 8, 8, 8),
+            MAKE_ITEM(sgemm_v3<32, 32, 16, 4, 4>),
+            MAKE_ITEM(sgemm_v3<32, 32, 32, 4, 4>),
+            MAKE_ITEM(sgemm_v3<64, 64, 16, 4, 4>),
+            MAKE_ITEM(sgemm_v3<64, 64, 32, 4, 4>),
+            MAKE_ITEM(sgemm_v3<128, 128, 8, 8, 8>),
+
+            MAKE_ITEM(sgemm_v4<64, 64, 16, 4, 4>),
+            MAKE_ITEM(sgemm_v4<64, 64, 32, 4, 4>),
+            MAKE_ITEM(sgemm_v4<128, 128, 8, 8, 8>),
+            MAKE_ITEM(sgemm_v4<128, 128, 16, 8, 8>),
         };
 
-#undef SGEMM_V3_ITEM
+#undef MAKE_ITEM
 
     printf("----- M=%d N=%d K=%d -----\n", M, N, K);
 
