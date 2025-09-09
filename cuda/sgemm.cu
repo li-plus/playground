@@ -313,12 +313,10 @@ void perf(int M, int N, int K) {
 #endif
     }
 
-    float *dA;
+    float *dA, *dB;
     CHECK_CUDA(cudaMalloc(&dA, M * K * sizeof(float)));
-    CHECK_CUDA(cudaMemcpy(dA, A, M * K * sizeof(float), cudaMemcpyHostToDevice));
-
-    float *dB;
     CHECK_CUDA(cudaMalloc(&dB, K * N * sizeof(float)));
+    CHECK_CUDA(cudaMemcpy(dA, A, M * K * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(dB, B, K * N * sizeof(float), cudaMemcpyHostToDevice));
 
     cublasHandle_t handle;
@@ -352,62 +350,41 @@ void perf(int M, int N, int K) {
     PerfRecord best_record;
     PerfRecord cublas_record;
 
+    float *dC_ref;
+    CHECK_CUDA(cudaMalloc(&dC_ref, M * N * sizeof(float)));
+
+    sgemm_cublas(handle, dA, dB, dC_ref, M, N, K);
+
     for (const auto &item : kernels) {
         const auto &name = std::get<0>(item);
         const auto &fn = std::get<1>(item);
 
-        float *C1, *C2;
-        CHECK_CUDA(cudaMallocHost(&C1, M * N * sizeof(float)));
-        CHECK_CUDA(cudaMallocHost(&C2, M * N * sizeof(float)));
+        float *dC_opt;
+        CHECK_CUDA(cudaMalloc(&dC_opt, M * N * sizeof(float)));
 
-        float *dC1, *dC2;
-        CHECK_CUDA(cudaMalloc(&dC1, M * N * sizeof(float)));
-        CHECK_CUDA(cudaMalloc(&dC2, M * N * sizeof(float)));
+        fn(dA, dB, dC_opt, M, N, K);
 
-        // cuda impl
-        fn(dA, dB, dC1, M, N, K);
-        CHECK_CUDA(cudaMemcpy(C1, dC1, M * N * sizeof(float), cudaMemcpyDeviceToHost));
+        check_is_close_d(dC_ref, dC_opt, M * N, 1e-4, 1e-5);
 
-        // cublas impl
-        sgemm_cublas(handle, dA, dB, dC2, M, N, K);
-        CHECK_CUDA(cudaMemcpy(C2, dC2, M * N * sizeof(float), cudaMemcpyDeviceToHost));
+        auto perf_fn = [=] { fn(dA, dB, dC_opt, M, N, K); };
+        const int warmup = std::max(4096 / M, 1);
+        const int active = warmup * 4;
+        const float elapsed = timeit(perf_fn, warmup, active);
 
-        // check correctness
-        bool is_correct = true;
-        for (int i = 0; i < M * N; i++) {
-            if (!is_close(C1[i], C2[i], 1e-4, 1e-5)) {
-                int x = i % N;
-                int y = i / N;
-                printf("[%s] error: result diff at (%d, %d): c1=%f vs c2=%f\n", name.c_str(), y, x, C1[i], C2[i]);
-                is_correct = false;
-                break;
-            }
+        const float tflops = (2ull * M * N * K) / 1e12f / elapsed;
+        const float bandwidth = (M * K + K * N + M * N) * sizeof(float) / 1e9f / elapsed;
+
+        printf("[%s] elapsed %.3f us, %.1f TFLOPS, %.3f GB/s\n", name.c_str(), elapsed * 1e6, tflops, bandwidth);
+
+        if (name == "cublas") {
+            cublas_record.name = name;
+            cublas_record.elapsed = elapsed;
+        } else if (elapsed < best_record.elapsed) {
+            best_record.name = name;
+            best_record.elapsed = elapsed;
         }
 
-        if (is_correct) {
-            auto perf_fn = [=] { fn(dA, dB, dC1, M, N, K); };
-            const int warmup = std::max(4096 / M, 1);
-            const int active = warmup * 4;
-            const float elapsed = timeit(perf_fn, warmup, active);
-
-            const float tflops = (2ull * M * N * K) / 1e12f / elapsed;
-            const float bandwidth = (M * K + K * N + M * N) * sizeof(float) / 1e9f / elapsed;
-
-            printf("[%s] elapsed %.3f us, %.1f TFLOPS, %.3f GB/s\n", name.c_str(), elapsed * 1e6, tflops, bandwidth);
-
-            if (name == "cublas") {
-                cublas_record.name = name;
-                cublas_record.elapsed = elapsed;
-            } else if (elapsed < best_record.elapsed) {
-                best_record.name = name;
-                best_record.elapsed = elapsed;
-            }
-        }
-
-        CHECK_CUDA(cudaFreeHost(C1));
-        CHECK_CUDA(cudaFreeHost(C2));
-        CHECK_CUDA(cudaFree(dC1));
-        CHECK_CUDA(cudaFree(dC2));
+        CHECK_CUDA(cudaFree(dC_opt));
     }
 
     printf("[best] %s vs cublas: %.1f%% (%.3f vs %.3f ms)\n", best_record.name.c_str(),
@@ -421,6 +398,7 @@ void perf(int M, int N, int K) {
 
     CHECK_CUDA(cudaFree(dA));
     CHECK_CUDA(cudaFree(dB));
+    CHECK_CUDA(cudaFree(dC_ref));
 }
 
 int main(int argc, char **argv) {
