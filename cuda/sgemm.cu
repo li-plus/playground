@@ -292,165 +292,27 @@ __device__ __forceinline__ void swap(T &a, T &b) {
     b = tmp;
 }
 
-// sgemm_v3 + prefetch
-template <int BM, int BN, int BK, int TM, int TN>
-__global__ void __launch_bounds__((BM / TM) * (BN / TN))
-    sgemm_v4_kernel(const float *__restrict__ A, const float *__restrict__ B, float *__restrict__ C, int M, int N,
-                    int K) {
-    constexpr int BX = BN / TN; // blockDim.x
-    constexpr int BY = BM / TM; // blockDim.y
-    constexpr int NUM_THREADS = BY * BX;
-
-    const int bx = blockIdx.x;
-    const int by = blockIdx.y;
-    const int tx = threadIdx.x;
-    const int ty = threadIdx.y;
-    const int tid = ty * BX + tx;
-
-    __shared__ float s_A[2][BM][BK];
-    __shared__ float s_B[2][BK][BN];
-
-    int read_idx = 0;
-    int write_idx = 1;
-
-    const float *A_block = A + by * BM * K;
-    const float *B_block = B + bx * BN;
-    float *C_block = C + by * BM * N + bx * BN;
-
-    float sums[TM][TN]{};
-
-    auto pipeline = cuda::make_pipeline();
-
-    static_assert((BM * BK) % (NUM_THREADS * 4) == 0, "unimplemented: corrupted load of A");
-    static_assert(BK <= NUM_THREADS * 4, "unimplemented: BK is too large");
-    constexpr int A_LOAD_TILE_X = BK / 4;
-    constexpr int A_LOAD_TILE_Y = NUM_THREADS / A_LOAD_TILE_X;
-    const int A_x = tid % A_LOAD_TILE_X * 4;
-    const int A_y = tid / A_LOAD_TILE_X;
-
-    static_assert((BK * BN) % (NUM_THREADS * 4) == 0, "unimplemented: corrupted load of B");
-    static_assert(BN <= NUM_THREADS * 4, "unimplemented: BN is too large");
-    constexpr int B_LOAD_TILE_X = BN / 4;
-    constexpr int B_LOAD_TILE_Y = NUM_THREADS / B_LOAD_TILE_X;
-    const int B_x = tid % B_LOAD_TILE_X * 4;
-    const int B_y = tid / B_LOAD_TILE_X;
-
-    auto fetch_block = [&](const float *A_block, const float *B_block, int k) {
-    // load BM * BK tile of A into shared memory
-#pragma unroll
-        for (int y_start = 0; y_start < BM; y_start += A_LOAD_TILE_Y) {
-            const int y = y_start + A_y;
-            cuda::memcpy_async((float4 *)&s_A[write_idx][y][A_x], (float4 *)&A_block[y * K + A_x], sizeof(float4),
-                               pipeline);
-        }
-
-        // load BK * BN tile of B into shared memory
-#pragma unroll
-        for (int y_start = 0; y_start < BK; y_start += B_LOAD_TILE_Y) {
-            const int y = y_start + B_y;
-            cuda::memcpy_async((float4 *)&s_B[write_idx][y][B_x], (float4 *)&B_block[y * N + B_x], sizeof(float4),
-                               pipeline);
-        }
-    };
-
-    pipeline.producer_acquire();
-    fetch_block(A_block, B_block, 0);
-    pipeline.producer_commit();
-
-    for (int k = 0; k < K; k += BK) {
-        swap(read_idx, write_idx);
-
-        pipeline.consumer_wait();
-        __syncthreads(); // single sync is enough
-
-        // prefetch next block
-        if (k < K - BK) {
-            pipeline.producer_acquire();
-            fetch_block(A_block + BK, B_block + BK * N, k + 1);
-            pipeline.producer_commit();
-        }
-
-        static_assert(TN % 4 == 0, "unimplemented: TN is not multiple of 4");
-
-        int reg_read_idx = 0, reg_write_idx = 1;
-        float reg_A[2][TM];
-        float reg_B[2][TN];
-
-        auto fetch_tile = [&](int tk) {
-        // load s_A tile into reg_A
-#pragma unroll
-            for (int tm = 0; tm < TM; tm++) {
-                reg_A[reg_write_idx][tm] = s_A[read_idx][ty * TM + tm][tk]; // bank conflict
-            }
-
-            // load s_B tile into reg_B
-            // if TN > 4, split into sub-tiles to avoid bank conflict
-#pragma unroll
-            for (int tn = 0; tn < TN; tn += 4) {
-                *(float4 *)&reg_B[reg_write_idx][tn] = *(float4 *)&s_B[read_idx][tk][tn * BX + tx * 4];
-            }
-        };
-
-#pragma unroll
-        for (int tk = 0; tk < BK; tk++) {
-            if (tk == 0) {
-                fetch_tile(0);
-            }
-            swap(reg_read_idx, reg_write_idx);
-            if (tk < BK - 1) {
-                fetch_tile(tk + 1);
-            }
-
-            // outer product
-#pragma unroll
-            for (int tm = 0; tm < TM; tm++) {
-#pragma unroll
-                for (int tn = 0; tn < TN; tn++) {
-                    sums[tm][tn] += reg_A[reg_read_idx][tm] * reg_B[reg_read_idx][tn];
-                }
-            }
-        }
-
-        pipeline.consumer_release();
-
-        A_block += BK;
-        B_block += BK * N;
-    }
-
-    // store sums to C
-#pragma unroll
-    for (int tm = 0; tm < TM; tm++) {
-#pragma unroll
-        for (int tn = 0; tn < TN; tn += 4) {
-            *(float4 *)&C_block[(ty * TM + tm) * N + tn * BX + tx * 4] = *(float4 *)&sums[tm][tn];
-        }
-    }
-}
-
-template <int BM = 32, int BN = 32, int BK = 32, int TM = 4, int TN = 4>
-void sgemm_v4(const float *A, const float *B, float *C, int M, int N, int K) {
-    CHECK(N % BN == 0 && M % BM == 0 && K % BK == 0) << "invalid matrix dimensions";
-
-    static_assert(BM % TM == 0 && BN % TN == 0);
-
-    constexpr int BLOCK_DIM_X = BN / TN;
-    constexpr int BLOCK_DIM_Y = BM / TM;
-    constexpr int NUM_THREADS = BLOCK_DIM_X * BLOCK_DIM_Y;
-    static_assert(32 <= NUM_THREADS && NUM_THREADS <= 1024);
-
-    dim3 grid_dim(N / BN, M / BM);
-    dim3 block_dim(BLOCK_DIM_X, BLOCK_DIM_Y);
-    sgemm_v4_kernel<BM, BN, BK, TM, TN><<<grid_dim, block_dim>>>(A, B, C, M, N, K);
-    CHECK_CUDA(cudaGetLastError());
-}
-
 void sgemm_cublas(cublasHandle_t handle, const float *A, const float *B, float *C, int M, int N, int K) {
     const float alpha = 1;
     const float beta = 0;
     CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha, B, N, A, K, &beta, C, N));
 }
 
-void perf(int M, int N, int K) {
+struct PerfRecord {
+    int M;
+    int N;
+    int K;
+    std::string name;
+    float elapsed;
+    float tflops;
+
+    PerfRecord() = default;
+
+    PerfRecord(int M, int N, int K, std::string name, float elapsed, float tflops)
+        : M(M), N(N), K(K), name(std::move(name)), elapsed(elapsed), tflops(tflops) {}
+};
+
+std::vector<PerfRecord> perf(int M, int N, int K) {
     // make data
     float *A, *B;
     CHECK_CUDA(cudaMallocHost(&A, sizeof(float) * M * K));
@@ -489,29 +351,17 @@ void perf(int M, int N, int K) {
                                 int K) { sgemm_cublas(handle, A, B, C, M, N, K); }},
             // {"sgemm_v1", sgemm_v1},
             // {"sgemm_v2", sgemm_v2},
-            MAKE_ITEM(sgemm_v3<32, 32, 16, 4, 4>),
-            MAKE_ITEM(sgemm_v3<32, 32, 32, 4, 4>),
-            MAKE_ITEM(sgemm_v3<64, 64, 16, 4, 4>),
-            MAKE_ITEM(sgemm_v3<64, 64, 32, 4, 4>),
-            MAKE_ITEM(sgemm_v3<128, 128, 8, 8, 8>),
 
-            MAKE_ITEM(sgemm_v4<64, 64, 16, 4, 4>),
-            MAKE_ITEM(sgemm_v4<64, 64, 32, 4, 4>),
-            MAKE_ITEM(sgemm_v4<128, 128, 8, 8, 8>),
-            MAKE_ITEM(sgemm_v4<128, 128, 16, 8, 8>),
+            MAKE_ITEM(sgemm_v3<64, 64, 32, 4, 4>),
+            MAKE_ITEM(sgemm_v3<64, 64, 64, 4, 8>),
+            MAKE_ITEM(sgemm_v3<64, 64, 32, 8, 4>),
         };
 
 #undef MAKE_ITEM
 
     printf("----- M=%d N=%d K=%d -----\n", M, N, K);
 
-    struct PerfRecord {
-        std::string name;
-        float elapsed = INFINITY;
-    };
-
-    PerfRecord best_record;
-    PerfRecord cublas_record;
+    std::vector<PerfRecord> records;
 
     float *dC_ref;
     CHECK_CUDA(cudaMalloc(&dC_ref, M * N * sizeof(float)));
@@ -539,16 +389,20 @@ void perf(int M, int N, int K) {
 
         printf("[%s] elapsed %.3f us, %.1f TFLOPS, %.3f GB/s\n", name.c_str(), elapsed * 1e6, tflops, bandwidth);
 
-        if (name == "cublas") {
-            cublas_record.name = name;
-            cublas_record.elapsed = elapsed;
-        } else if (elapsed < best_record.elapsed) {
-            best_record.name = name;
-            best_record.elapsed = elapsed;
-        }
+        records.emplace_back(PerfRecord(M, N, K, name, elapsed, tflops));
 
         CHECK_CUDA(cudaFree(dC_opt));
     }
+
+    auto cublas_record_it =
+        std::find_if(records.begin(), records.end(), [](const PerfRecord &r) { return r.name == "cublas"; });
+    CHECK(cublas_record_it != records.end());
+    PerfRecord cublas_record = std::move(*cublas_record_it);
+    records.erase(cublas_record_it);
+
+    CHECK(!records.empty());
+    PerfRecord best_record = *std::min_element(
+        records.begin(), records.end(), [](const PerfRecord &a, const PerfRecord &b) { return a.elapsed < b.elapsed; });
 
     printf("[best] %s vs cublas: %.1f%% (%.3f vs %.3f ms)\n", best_record.name.c_str(),
            cublas_record.elapsed / best_record.elapsed * 100.f, best_record.elapsed * 1e3f,
@@ -562,24 +416,45 @@ void perf(int M, int N, int K) {
     CHECK_CUDA(cudaFree(dA));
     CHECK_CUDA(cudaFree(dB));
     CHECK_CUDA(cudaFree(dC_ref));
+
+    records.emplace_back(std::move(cublas_record));
+    return records;
+}
+
+void save_result(const char *save_path, const std::vector<PerfRecord> &all_records) {
+    // write to csv
+    FILE *stream = fopen(save_path, "w");
+    fprintf(stream, "M|N|K|name|elapsed|TFLOPS\n");
+    for (const auto &r : all_records) {
+        fprintf(stream, "%d|%d|%d|%s|%f|%f\n", r.M, r.N, r.K, r.name.c_str(), r.elapsed, r.tflops);
+    }
+    fclose(stream);
 }
 
 int main(int argc, char **argv) {
     // square matrix
     {
-        const int dims[]{128, 256, 512, 1024, 2048, 4096};
+        std::vector<PerfRecord> all_records;
+        const int dims[]{1024, 2048, 3072, 4096, 6144, 8192};
         for (int d : dims) {
-            perf(d, d, d);
+            auto records = perf(d, d, d);
+            all_records.insert(all_records.end(), records.begin(), records.end());
         }
+
+        save_result("sgemm_bench_square.csv", all_records);
     }
 
     // fixed K to avoid split-K kernels
     {
+        std::vector<PerfRecord> all_records;
         constexpr int K = 1024;
-        const int dims[]{1024, 2048, 4096, 8192, 16384};
+        const int dims[]{1024, 2048, 3072, 4096, 6144, 8192, 12288, 16384};
         for (int d : dims) {
-            perf(d, d, K);
+            auto records = perf(d, d, K);
+            all_records.insert(all_records.end(), records.begin(), records.end());
         }
+
+        save_result("sgemm_bench_fixk.csv", all_records);
     }
 
     return 0;
