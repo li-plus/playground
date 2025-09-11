@@ -4,7 +4,6 @@
 // CUTLASS docs: https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md
 
 #include "common.h"
-#include <cuda/pipeline>
 #include <cuda_fp16.h>
 #include <functional>
 #include <mma.h>
@@ -12,6 +11,19 @@
 // #define HGEMM_DEBUG
 
 using namespace nvcuda;
+
+template <typename T>
+__device__ __forceinline__ void cp_async_cg(T *dst, const T *src) {
+    uint32_t smem_int_ptr = __cvta_generic_to_shared(dst);
+    asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" ::"r"(smem_int_ptr), "l"(src), "n"(sizeof(T)));
+}
+
+__device__ __forceinline__ void cp_async_commit_group() { asm volatile("cp.async.commit_group;\n" ::); }
+
+template <int n>
+__device__ __forceinline__ void cp_async_wait_group() {
+    asm volatile("cp.async.wait_group %0;\n" ::"n"(n));
+}
 
 // shared memory
 template <int BLOCK_DIM>
@@ -208,10 +220,7 @@ warp tiling: (WM = 2 * WMMA_M, WN = 2 * WMMA_N)
         }
     }
 
-    auto pipeline = cuda::make_pipeline();
-
     for (int k = 0; k < K; k += BK) {
-        pipeline.producer_acquire();
 
         // load BM * BK tile of A into shared memory
         {
@@ -223,7 +232,7 @@ warp tiling: (WM = 2 * WMMA_M, WN = 2 * WMMA_N)
 #pragma unroll
             for (int y_start = 0; y_start < BM; y_start += A_LOAD_TILE_Y) {
                 const int y = y_start + tid / A_LOAD_TILE_X;
-                cuda::memcpy_async((float4 *)&s_A[y][x], (float4 *)&A_block[y * K + x], sizeof(float4), pipeline);
+                cp_async_cg((float4 *)&s_A[y][x], (float4 *)&A_block[y * K + x]);
             }
         }
 
@@ -237,13 +246,13 @@ warp tiling: (WM = 2 * WMMA_M, WN = 2 * WMMA_N)
 #pragma unroll
             for (int y_start = 0; y_start < BK; y_start += B_LOAD_TILE_Y) {
                 const int y = y_start + tid / B_LOAD_TILE_X;
-                cuda::memcpy_async((float4 *)&s_B[y][x], (float4 *)&B_block[y * N + x], sizeof(float4), pipeline);
+                cp_async_cg((float4 *)&s_B[y][x], (float4 *)&B_block[y * N + x]);
             }
         }
 
-        pipeline.producer_commit();
+        cp_async_commit_group();
 
-        pipeline.consumer_wait();
+        cp_async_wait_group<0>();
         __syncthreads();
 
 #pragma unroll
@@ -270,7 +279,6 @@ warp tiling: (WM = 2 * WMMA_M, WN = 2 * WMMA_N)
             }
         }
 
-        pipeline.consumer_release();
         __syncthreads();
 
         A_block += BK;
@@ -336,7 +344,7 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
 
     for (int i = 0; i < M * K; i++) {
 #ifndef HGEMM_DEBUG
-        A[i] = __float2half(-(uniform() * 2 - 1) / std::sqrt(K));
+        A[i] = __float2half((uniform() * 2 - 1) / std::sqrt(K));
 #else
         A[i] = __float2half(i / 100.f);
 #endif
@@ -344,7 +352,7 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
 
     for (int i = 0; i < K * N; i++) {
 #ifndef HGEMM_DEBUG
-        B[i] = __float2half(-(uniform() * 2 - 1) / std::sqrt(K));
+        B[i] = __float2half((uniform() * 2 - 1) / std::sqrt(K));
 #else
         B[i] = __float2half(i / 100.f);
 #endif
@@ -463,30 +471,30 @@ void save_result(const char *save_path, const std::vector<PerfRecord> &all_recor
 }
 
 int main(int argc, char **argv) {
-    // square matrix
-    {
-        std::vector<PerfRecord> all_records;
-        const int dims[]{1024, 2048, 3072, 4096, 6144, 8192};
-        for (int d : dims) {
-            auto records = perf(d, d, d);
-            all_records.insert(all_records.end(), records.begin(), records.end());
-        }
-
-        save_result("output/hgemm_bench_square.csv", all_records);
-    }
-
-    // fixed K to avoid split-K kernels
+    // // square matrix
     // {
     //     std::vector<PerfRecord> all_records;
-    //     constexpr int K = 1024;
-    //     const int dims[]{128, 256, 512, 1024, 2048, 3072, 4096, 6144, 8192, 12288, 16384};
+    //     const int dims[]{1024, 2048, 3072, 4096, 6144, 8192};
     //     for (int d : dims) {
-    //         auto records = perf(d, d, K);
+    //         auto records = perf(d, d, d);
     //         all_records.insert(all_records.end(), records.begin(), records.end());
     //     }
 
-    //     save_result("output/hgemm_bench_fixk.csv", all_records);
+    //     save_result("output/hgemm_bench_square.csv", all_records);
     // }
+
+    // fixed K to avoid split-K kernels
+    {
+        std::vector<PerfRecord> all_records;
+        constexpr int K = 1024;
+        const int dims[]{1024, 2048, 3072, 4096, 6144, 8192, 12288, 16384};
+        for (int d : dims) {
+            auto records = perf(d, d, K);
+            all_records.insert(all_records.end(), records.begin(), records.end());
+        }
+
+        save_result("output/hgemm_bench_fixk.csv", all_records);
+    }
 
     return 0;
 }
