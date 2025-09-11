@@ -309,11 +309,157 @@ void hgemm_v3(const half *A, const half *B, half *C, int M, int N, int K) {
     CHECK_CUDA(cudaGetLastError());
 }
 
-template <typename T>
-__device__ __forceinline__ void swap(T &a, T &b) {
-    T tmp = a;
-    a = b;
-    b = tmp;
+// multi-stage
+template <int BM, int BN, int BK, int WX, int WY, int STAGES, int WMMA_M, int WMMA_N, int WMMA_K, int PAD_A, int PAD_B>
+__global__ void __launch_bounds__(WX *WY *WARP_SIZE)
+    hgemm_v4_kernel(const half *__restrict__ A, const half *__restrict__ B, half *__restrict__ C, int M, int N, int K) {
+
+    static_assert(STAGES > 1, "unimplemented: STAGES must be greater than 1");
+    static_assert(BM % (WY * WMMA_M) == 0 && BN % (WX * WMMA_N) == 0 && BK % WMMA_K == 0,
+                  "unimplemented: invalid template parameters");
+
+    // https://docs.nvidia.com/cuda/cuda-c-programming-guide/#wmma-description
+    static_assert(PAD_A % 16 == 0 && PAD_B % 16 == 0, "A&B address must be 256-bit aligned");
+
+    constexpr int NUM_THREADS = WX * WY * WARP_SIZE;
+    static_assert(32 <= NUM_THREADS && NUM_THREADS <= 1024, "unimplemented: invalid number of threads");
+
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
+    const int tx = threadIdx.x;
+    const int tid = tx;
+
+    const int wid = tid / WARP_SIZE;
+    const int wx = wid % WX;
+    const int wy = wid / WX;
+
+    __shared__ half s_A[STAGES][BM][BK + PAD_A];
+    __shared__ half s_B[STAGES][BK][BN + PAD_B];
+
+    constexpr int NUM_TILES_M = BM / (WY * WMMA_M);
+    constexpr int NUM_TILES_N = BN / (WX * WMMA_N);
+
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frags[NUM_TILES_M][NUM_TILES_N];
+#pragma unroll
+    for (int m = 0; m < NUM_TILES_M; m++) {
+#pragma unroll
+        for (int n = 0; n < NUM_TILES_N; n++) {
+            wmma::fill_fragment(c_frags[m][n], 0.f);
+        }
+    }
+
+    // ===== fetch block =====
+    static_assert((BM * BK) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of A");
+    static_assert(BK <= NUM_THREADS * 8, "unimplemented: BK is too large");
+    constexpr int A_LOAD_TILE_X = BK / 8;
+    constexpr int A_LOAD_TILE_Y = NUM_THREADS / A_LOAD_TILE_X;
+    const int A_x = tid % A_LOAD_TILE_X * 8;
+    const int A_y = tid / A_LOAD_TILE_X;
+
+    static_assert((BK * BN) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of B");
+    static_assert(BN <= NUM_THREADS * 8, "unimplemented: BN is too large");
+    constexpr int B_LOAD_TILE_X = BN / 8;
+    constexpr int B_LOAD_TILE_Y = NUM_THREADS / B_LOAD_TILE_X;
+    const int B_x = tid % B_LOAD_TILE_X * 8;
+    const int B_y = tid / B_LOAD_TILE_X;
+
+    auto fetch_block = [&](int i) {
+        const int stage = i % STAGES;
+
+        // load BM * BK tile of A into shared memory
+        const half *A_block = A + by * BM * K + i * BK;
+#pragma unroll
+        for (int y_start = 0; y_start < BM; y_start += A_LOAD_TILE_Y) {
+            const int y = y_start + A_y;
+            cp_async_cg((float4 *)&s_A[stage][y][A_x], (float4 *)&A_block[y * K + A_x]);
+        }
+
+        // load BK * BN tile of B into shared memory
+        const half *B_block = B + bx * BN + i * BK * N;
+#pragma unroll
+        for (int y_start = 0; y_start < BK; y_start += B_LOAD_TILE_Y) {
+            const int y = y_start + B_y;
+            cp_async_cg((float4 *)&s_B[stage][y][B_x], (float4 *)&B_block[y * N + B_x]);
+        }
+    };
+
+    // ===== mma =====
+    auto mma_compute = [&](int i) {
+        const int stage = i % STAGES;
+
+        wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> a_frags[NUM_TILES_M];
+        wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> b_frags[NUM_TILES_N];
+
+#pragma unroll
+        for (int wk = 0; wk < BK; wk += WMMA_K) {
+#pragma unroll
+            for (int wm = 0; wm < NUM_TILES_M; wm++) {
+                wmma::load_matrix_sync(a_frags[wm], &s_A[stage][(wm * WY + wy) * WMMA_M][wk], BK + PAD_A);
+            }
+
+#pragma unroll
+            for (int wn = 0; wn < NUM_TILES_N; wn++) {
+                wmma::load_matrix_sync(b_frags[wn], &s_B[stage][wk][(wn * WX + wx) * WMMA_N], BN + PAD_B);
+            }
+
+#pragma unroll
+            for (int wm = 0; wm < NUM_TILES_M; wm++) {
+#pragma unroll
+                for (int wn = 0; wn < NUM_TILES_N; wn++) {
+                    wmma::mma_sync(c_frags[wm][wn], a_frags[wm], b_frags[wn], c_frags[wm][wn]);
+                }
+            }
+        }
+    };
+
+#pragma unroll
+    for (int i = 0; i < STAGES - 1; i++) {
+        fetch_block(i);
+        cp_async_commit_group();
+    }
+
+    for (int i = STAGES - 1; i < K / BK; i++) {
+        cp_async_wait_group<STAGES - 2>();
+        __syncthreads();
+
+        fetch_block(i);
+        cp_async_commit_group();
+
+        mma_compute(i - (STAGES - 1));
+    }
+
+    cp_async_wait_group<0>();
+    __syncthreads();
+
+#pragma unroll
+    for (int i = -(STAGES - 1); i < 0; i++) {
+        mma_compute(K / BK + i);
+    }
+
+    // store sums to C
+    half *C_block = C + by * BM * N + bx * BN;
+#pragma unroll
+    for (int m = 0; m < NUM_TILES_M; m++) {
+#pragma unroll
+        for (int n = 0; n < NUM_TILES_N; n++) {
+            auto c_frag_fp16 = fragment_to_half(c_frags[m][n]);
+            wmma::store_matrix_sync(&C_block[(m * WY + wy) * WMMA_M * N + (n * WX + wx) * WMMA_N], c_frag_fp16, N,
+                                    wmma::mem_row_major);
+        }
+    }
+}
+
+template <int BM = 64, int BN = 64, int BK = 64, int WX = 1, int WY = 1, int STAGES = 2, int WMMA_M = 16,
+          int WMMA_N = 16, int WMMA_K = 16, int PAD_A = 0, int PAD_B = 0>
+void hgemm_v4(const half *A, const half *B, half *C, int M, int N, int K) {
+    CHECK(N % BN == 0 && M % BM == 0 && K % BK == 0) << "unimplemented: invalid matrix dimensions";
+
+    dim3 grid_dim(N / BN, M / BM);
+    constexpr int block_dim = WX * WY * WARP_SIZE;
+
+    hgemm_v4_kernel<BM, BN, BK, WX, WY, STAGES, WMMA_M, WMMA_N, WMMA_K, PAD_A, PAD_B>
+        <<<grid_dim, block_dim>>>(A, B, C, M, N, K);
+    CHECK_CUDA(cudaGetLastError());
 }
 
 void hgemm_cublas(cublasHandle_t handle, const half *A, const half *B, half *C, int M, int N, int K) {
@@ -373,26 +519,18 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
         kernels{
             {"cublas", [handle](const half *A, const half *B, half *C, int M, int N,
                                 int K) { hgemm_cublas(handle, A, B, C, M, N, K); }},
-            MAKE_ITEM(hgemm_v1),
+            // MAKE_ITEM(hgemm_v1),
             MAKE_ITEM(hgemm_v2<16, 16, 16>),
             // MAKE_ITEM(hgemm_v2<32, 8, 16>),
             // MAKE_ITEM(hgemm_v2<8, 32, 16>),
 
             MAKE_ITEM(hgemm_v3<64, 64, 32, 1, 1>),
-            MAKE_ITEM(hgemm_v3<64, 64, 32, 1, 2>),
-            MAKE_ITEM(hgemm_v3<64, 64, 32, 2, 1>),
-            MAKE_ITEM(hgemm_v3<64, 64, 32, 2, 2>),
+            // MAKE_ITEM(hgemm_v3<64, 64, 32, 1, 2>),
+            // MAKE_ITEM(hgemm_v3<64, 64, 32, 2, 1>),
+            // MAKE_ITEM(hgemm_v3<64, 64, 32, 2, 2>),
 
-            MAKE_ITEM(hgemm_v3<64, 64, 64, 1, 1>),
-            MAKE_ITEM(hgemm_v3<64, 64, 64, 1, 2>),
-            MAKE_ITEM(hgemm_v3<64, 64, 64, 2, 1>),
-            MAKE_ITEM(hgemm_v3<64, 64, 64, 2, 2>),
-
-            MAKE_ITEM(hgemm_v3<64, 64, 32, 2, 4>),
-            MAKE_ITEM(hgemm_v3<64, 64, 64, 2, 4>),
-            MAKE_ITEM(hgemm_v3<64, 64, 64, 4, 4>),
-            // MAKE_ITEM(hgemm_v3<64, 64, 64, 4, 8>),
-            // MAKE_ITEM(hgemm_v3<64, 64, 32, 8, 4>),
+            // MAKE_ITEM(hgemm_v4<128, 128, 16, 2, 2, 2>),
+            MAKE_ITEM(hgemm_v4<128, 128, 32, 2, 2, 2>),
         };
 
 #undef MAKE_ITEM
@@ -419,12 +557,12 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
         check_is_close_d(dC_ref, dC_opt, M * N, 1e-2, 1e-2);
 
         auto perf_fn = [=] { fn(dA, dB, dC_opt, M, N, K); };
-        const int warmup = std::max(4096 / M, 1);
-        const int active = warmup * 4;
+        const int warmup = std::max(4096 / M, 2);
+        const int active = warmup * 5;
         const float elapsed = timeit(perf_fn, warmup, active);
 
-        const float tflops = (2ull * M * N * K) / 1e12f / elapsed;
-        const float bandwidth = (M * K + K * N + M * N) * sizeof(half) / 1e9f / elapsed;
+        const double tflops = (2ull * M * N * K) * 1e-12 / elapsed;
+        const float bandwidth = (M * K + K * N + M * N) * sizeof(half) * 1e-9f / elapsed;
 
         printf("[%s] elapsed %.3f us, %.1f TFLOPS, %.3f GB/s\n", name.c_str(), elapsed * 1e6, tflops, bandwidth);
 
@@ -471,30 +609,30 @@ void save_result(const char *save_path, const std::vector<PerfRecord> &all_recor
 }
 
 int main(int argc, char **argv) {
-    // // square matrix
-    // {
-    //     std::vector<PerfRecord> all_records;
-    //     const int dims[]{1024, 2048, 3072, 4096, 6144, 8192};
-    //     for (int d : dims) {
-    //         auto records = perf(d, d, d);
-    //         all_records.insert(all_records.end(), records.begin(), records.end());
-    //     }
-
-    //     save_result("output/hgemm_bench_square.csv", all_records);
-    // }
-
-    // fixed K to avoid split-K kernels
+    // square matrix
     {
         std::vector<PerfRecord> all_records;
-        constexpr int K = 1024;
-        const int dims[]{1024, 2048, 3072, 4096, 6144, 8192, 12288, 16384};
+        const int dims[]{1024, 2048, 3072, 4096, 6144, 8192};
         for (int d : dims) {
-            auto records = perf(d, d, K);
+            auto records = perf(d, d, d);
             all_records.insert(all_records.end(), records.begin(), records.end());
         }
 
-        save_result("output/hgemm_bench_fixk.csv", all_records);
+        save_result("output/hgemm_bench_square.csv", all_records);
     }
+
+    // fixed K to avoid split-K kernels
+    // {
+    //     std::vector<PerfRecord> all_records;
+    //     constexpr int K = 1024;
+    //     const int dims[]{1024, 2048, 3072, 4096, 6144, 8192, 12288, 16384};
+    //     for (int d : dims) {
+    //         auto records = perf(d, d, K);
+    //         all_records.insert(all_records.end(), records.begin(), records.end());
+    //     }
+
+    //     save_result("output/hgemm_bench_fixk.csv", all_records);
+    // }
 
     return 0;
 }
