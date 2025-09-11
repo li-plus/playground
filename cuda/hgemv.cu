@@ -23,7 +23,7 @@ __global__ void hgemv_cuda_kernel(const half *__restrict__ A, const half *__rest
     sum = block_reduce_sum<block_size, false>(sum);
 
     if (threadIdx.x == 0) {
-        y[blockIdx.x] = sum;
+        y[blockIdx.x] = __float2half(sum);
     }
 }
 
@@ -34,8 +34,8 @@ static inline void hgemv_cuda(const half *A, const half *x, half *y, int M, int 
 }
 
 static inline void hgemv_cublas(cublasHandle_t handle, const half *A, const half *x, half *y, int M, int N) {
-    const half alpha = 1;
-    const half beta = 0;
+    const half alpha = __float2half(1);
+    const half beta = __float2half(0);
     CHECK_CUBLAS(cublasHgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, 1, N, &alpha, A, N, x, N, &beta, y, M));
 }
 
@@ -60,11 +60,11 @@ int main() {
 
     for (int i = 0; i < M; i++) {
         for (int j = 0; j < N; j++) {
-            h_A[i] = uniform(-0.5, 0.5);
+            h_A[i] = __float2half(uniform(-0.5, 0.5));
         }
     }
     for (int i = 0; i < N; i++) {
-        h_x[i] = uniform(-0.5, 0.5);
+        h_x[i] = __float2half(uniform(-0.5, 0.5));
     }
     CHECK_CUDA(cudaMemcpyAsync(d_A, h_A, M * N * sizeof(half), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpyAsync(d_x, h_x, N * sizeof(half), cudaMemcpyHostToDevice));

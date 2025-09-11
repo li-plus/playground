@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 #include <cublas_v2.h>
@@ -7,6 +8,7 @@
 #include <cudnn.h>
 #include <sstream>
 #include <stdio.h>
+#include <vector>
 
 namespace cg = cooperative_groups;
 
@@ -76,15 +78,22 @@ static inline bool is_close(float a, float b, float atol = 1e-5f, float rtol = 1
 }
 
 static inline void check_is_close(const float *a, const float *b, size_t n, float atol = 1e-5f, float rtol = 1e-8f) {
+    float max_abs_diff = -INFINITY;
+    int diff_cnt = 0;
     for (size_t i = 0; i < n; i++) {
-        CHECK(is_close(a[i], b[i], atol, rtol)) << a[i] << " vs " << b[i];
+        if (!is_close(a[i], b[i], atol, rtol)) {
+            diff_cnt++;
+            max_abs_diff = std::max(max_abs_diff, std::abs(a[i] - b[i]));
+        }
     }
+    CHECK(diff_cnt == 0) << "max abs diff: " << max_abs_diff << ", total diff cnt: " << diff_cnt;
 }
 
 static inline void check_is_close(const half *a, const half *b, size_t n, float atol = 1e-5f, float rtol = 1e-8f) {
-    for (size_t i = 0; i < n; i++) {
-        CHECK(is_close((float)a[i], (float)b[i], atol, rtol)) << (float)a[i] << " vs " << (float)b[i];
-    }
+    std::vector<float> f_a(n), f_b(n);
+    std::transform(a, a + n, f_a.begin(), [](half v) { return __half2float(v); });
+    std::transform(b, b + n, f_b.begin(), [](half v) { return __half2float(v); });
+    check_is_close(f_a.data(), f_b.data(), n, atol, rtol);
 }
 
 template <typename T>
