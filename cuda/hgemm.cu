@@ -137,7 +137,7 @@ void hgemm_v2(const half *A, const half *B, half *C, int M, int N, int K) {
     CHECK_CUDA(cudaGetLastError());
 }
 
-template <int BM, int BN, int BK, int WX, int WY, int WMMA_M, int WMMA_N, int WMMA_K>
+template <int BM, int BN, int BK, int WX, int WY, int WMMA_M, int WMMA_N, int WMMA_K, int PAD_A, int PAD_B>
 __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
     hgemm_v3_kernel(const half *__restrict__ A, const half *__restrict__ B, half *__restrict__ C, int M, int N, int K) {
 
@@ -201,8 +201,9 @@ warp tiling: (WM = 2 * WMMA_M, WN = 2 * WMMA_N)
     const int wx = wid % WX;
     const int wy = wid / WX;
 
-    __shared__ half s_A[BM][BK];
-    __shared__ half s_B[BK][BN];
+    // pad to reduce wmma::load_matrix_sync bank conflict
+    __shared__ half s_A[BM][BK + PAD_A];
+    __shared__ half s_B[BK][BN + PAD_B];
 
     const half *A_block = A + by * BM * K;
     const half *B_block = B + bx * BN;
@@ -262,12 +263,12 @@ warp tiling: (WM = 2 * WMMA_M, WN = 2 * WMMA_N)
 
 #pragma unroll
             for (int wm = 0; wm < NUM_TILES_M; wm++) {
-                wmma::load_matrix_sync(a_frags[wm], &s_A[(wm * WY + wy) * WMMA_M][wk], BK);
+                wmma::load_matrix_sync(a_frags[wm], &s_A[(wm * WY + wy) * WMMA_M][wk], BK + PAD_A);
             }
 
 #pragma unroll
             for (int wn = 0; wn < NUM_TILES_N; wn++) {
-                wmma::load_matrix_sync(b_frags[wn], &s_B[wk][(wn * WX + wx) * WMMA_N], BN);
+                wmma::load_matrix_sync(b_frags[wn], &s_B[wk][(wn * WX + wx) * WMMA_N], BN + PAD_B);
             }
 
 #pragma unroll
@@ -298,14 +299,15 @@ warp tiling: (WM = 2 * WMMA_M, WN = 2 * WMMA_N)
 }
 
 template <int BM = 64, int BN = 64, int BK = 64, int WX = 1, int WY = 1, int WMMA_M = 16, int WMMA_N = 16,
-          int WMMA_K = 16>
+          int WMMA_K = 16, int PAD_A = 16, int PAD_B = 16>
 void hgemm_v3(const half *A, const half *B, half *C, int M, int N, int K) {
     CHECK(N % BN == 0 && M % BM == 0 && K % BK == 0) << "unimplemented: invalid matrix dimensions";
 
     dim3 grid_dim(N / BN, M / BM);
     constexpr int block_dim = WX * WY * WARP_SIZE;
 
-    hgemm_v3_kernel<BM, BN, BK, WX, WY, WMMA_M, WMMA_N, WMMA_K><<<grid_dim, block_dim>>>(A, B, C, M, N, K);
+    hgemm_v3_kernel<BM, BN, BK, WX, WY, WMMA_M, WMMA_N, WMMA_K, PAD_A, PAD_B>
+        <<<grid_dim, block_dim>>>(A, B, C, M, N, K);
     CHECK_CUDA(cudaGetLastError());
 }
 
@@ -450,7 +452,7 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
 }
 
 template <int BM = 64, int BN = 64, int BK = 64, int WX = 1, int WY = 1, int STAGES = 2, int WMMA_M = 16,
-          int WMMA_N = 16, int WMMA_K = 16, int PAD_A = 0, int PAD_B = 0>
+          int WMMA_N = 16, int WMMA_K = 16, int PAD_A = 16, int PAD_B = 16>
 void hgemm_v4(const half *A, const half *B, half *C, int M, int N, int K) {
     CHECK(N % BN == 0 && M % BM == 0 && K % BK == 0) << "unimplemented: invalid matrix dimensions";
 
@@ -520,16 +522,13 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
             {"cublas", [handle](const half *A, const half *B, half *C, int M, int N,
                                 int K) { hgemm_cublas(handle, A, B, C, M, N, K); }},
             // MAKE_ITEM(hgemm_v1),
+
             MAKE_ITEM(hgemm_v2<16, 16, 16>),
             // MAKE_ITEM(hgemm_v2<32, 8, 16>),
             // MAKE_ITEM(hgemm_v2<8, 32, 16>),
 
-            MAKE_ITEM(hgemm_v3<64, 64, 32, 1, 1>),
-            // MAKE_ITEM(hgemm_v3<64, 64, 32, 1, 2>),
-            // MAKE_ITEM(hgemm_v3<64, 64, 32, 2, 1>),
-            // MAKE_ITEM(hgemm_v3<64, 64, 32, 2, 2>),
+            MAKE_ITEM(hgemm_v3<128, 128, 32, 2, 2>),
 
-            // MAKE_ITEM(hgemm_v4<128, 128, 16, 2, 2, 2>),
             MAKE_ITEM(hgemm_v4<128, 128, 32, 2, 2, 2>),
         };
 
