@@ -1,6 +1,11 @@
 // Tutorial:
-// https://siboehm.com/articles/22/CUDA-MMM
-// https://zhuanlan.zhihu.com/p/657632577
+// * https://siboehm.com/articles/22/CUDA-MMM
+// * https://zhuanlan.zhihu.com/p/657632577
+// MMA:
+// * https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-for-mma
+// Swizzle:
+// * https://zhuanlan.zhihu.com/p/27381896431
+// * https://zhuanlan.zhihu.com/p/671419093
 // CUTLASS docs: https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md
 
 #include "common.h"
@@ -22,7 +27,11 @@ __device__ __forceinline__ void cp_async_commit_group() { asm volatile("cp.async
 
 template <int n>
 __device__ __forceinline__ void cp_async_wait_group() {
-    asm volatile("cp.async.wait_group %0;\n" ::"n"(n));
+    if constexpr (n == 0) {
+        asm volatile("cp.async.wait_all;\n" ::);
+    } else {
+        asm volatile("cp.async.wait_group %0;\n" ::"n"(n));
+    }
 }
 
 // shared memory
@@ -106,9 +115,54 @@ __global__ void hgemm_v2_kernel(const half *__restrict__ A, const half *__restri
     auto c_frag_fp16 = fragment_to_half(c_frag);
     wmma::store_matrix_sync(C_block, c_frag_fp16, N, wmma::mem_row_major);
 
+    // clang-format off
+    /*
+wmma layout:
+                                                                                                        B frag
+                                                                            0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15
+                                                                        -------------------------------------------------------------------
+                                                                        0:  0   4   8   12  16  20  24  28  0   4   8   12  16  20  24  28
+                                                                        1:  0   4   8   12  16  20  24  28  0   4   8   12  16  20  24  28
+                                                                        2:  1   5   9   13  17  21  25  29  1   5   9   13  17  21  25  29
+                                                                        3:  1   5   9   13  17  21  25  29  1   5   9   13  17  21  25  29
+                                                                        4:  2   6   10  14  18  22  26  30  2   6   10  14  18  22  26  30
+                                                                        5:  2   6   10  14  18  22  26  30  2   6   10  14  18  22  26  30
+                                                                        6:  3   7   11  15  19  23  27  31  3   7   11  15  19  23  27  31
+                                                                        7:  3   7   11  15  19  23  27  31  3   7   11  15  19  23  27  31
+                                                                        8:  0   4   8   12  16  20  24  28  0   4   8   12  16  20  24  28
+                                                                        9:  0   4   8   12  16  20  24  28  0   4   8   12  16  20  24  28
+                                                                        10: 1   5   9   13  17  21  25  29  1   5   9   13  17  21  25  29
+                                                                        11: 1   5   9   13  17  21  25  29  1   5   9   13  17  21  25  29
+                                                                        12: 2   6   10  14  18  22  26  30  2   6   10  14  18  22  26  30
+                                                                        13: 2   6   10  14  18  22  26  30  2   6   10  14  18  22  26  30
+                                                                        14: 3   7   11  15  19  23  27  31  3   7   11  15  19  23  27  31
+                                                                        15: 3   7   11  15  19  23  27  31  3   7   11  15  19  23  27  31
+
+    0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15           0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15
+-------------------------------------------------------------------     -------------------------------------------------------------------
+0:  0   0   1   1   2   2   3   3   0   0   1   1   2   2   3   3       0:  0   0   1   1   2   2   3   3   0   0   1   1   2   2   3   3
+1:  4   4   5   5   6   6   7   7   4   4   5   5   6   6   7   7       1:  4   4   5   5   6   6   7   7   4   4   5   5   6   6   7   7
+2:  8   8   9   9   10  10  11  11  8   8   9   9   10  10  11  11      2:  8   8   9   9   10  10  11  11  8   8   9   9   10  10  11  11
+3:  12  12  13  13  14  14  15  15  12  12  13  13  14  14  15  15      3:  12  12  13  13  14  14  15  15  12  12  13  13  14  14  15  15
+4:  16  16  17  17  18  18  19  19  16  16  17  17  18  18  19  19      4:  16  16  17  17  18  18  19  19  16  16  17  17  18  18  19  19
+5:  20  20  21  21  22  22  23  23  20  20  21  21  22  22  23  23      5:  20  20  21  21  22  22  23  23  20  20  21  21  22  22  23  23
+6:  24  24  25  25  26  26  27  27  24  24  25  25  26  26  27  27      6:  24  24  25  25  26  26  27  27  24  24  25  25  26  26  27  27
+7:  28  28  29  29  30  30  31  31  28  28  29  29  30  30  31  31      7:  28  28  29  29  30  30  31  31  28  28  29  29  30  30  31  31
+8:  0   0   1   1   2   2   3   3   0   0   1   1   2   2   3   3       8:  0   0   1   1   2   2   3   3   0   0   1   1   2   2   3   3
+9:  4   4   5   5   6   6   7   7   4   4   5   5   6   6   7   7       9:  4   4   5   5   6   6   7   7   4   4   5   5   6   6   7   7
+10: 8   8   9   9   10  10  11  11  8   8   9   9   10  10  11  11      10: 8   8   9   9   10  10  11  11  8   8   9   9   10  10  11  11
+11: 12  12  13  13  14  14  15  15  12  12  13  13  14  14  15  15      11: 12  12  13  13  14  14  15  15  12  12  13  13  14  14  15  15
+12: 16  16  17  17  18  18  19  19  16  16  17  17  18  18  19  19      12: 16  16  17  17  18  18  19  19  16  16  17  17  18  18  19  19
+13: 20  20  21  21  22  22  23  23  20  20  21  21  22  22  23  23      13: 20  20  21  21  22  22  23  23  20  20  21  21  22  22  23  23
+14: 24  24  25  25  26  26  27  27  24  24  25  25  26  26  27  27      14: 24  24  25  25  26  26  27  27  24  24  25  25  26  26  27  27
+15: 28  28  29  29  30  30  31  31  28  28  29  29  30  30  31  31      15: 28  28  29  29  30  30  31  31  28  28  29  29  30  30  31  31
+                        A frag                                                              C frag (same layout as A)
+    */
+    // clang-format on
+
 #ifdef HGEMM_DEBUG
     printf("block (%d, %d) thread (%d, %d) a_frag(%d): [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f] b_frag(%d): "
-           "[%.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f] C_frag(%d): [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, "
+           "[%.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f] c_frag(%d): [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, "
            "%.2f]\n",
            bx, by, threadIdx.x, threadIdx.y, a_frag.num_storage_elements, __half2float(a_frag.x[0]),
            __half2float(a_frag.x[1]), __half2float(a_frag.x[2]), __half2float(a_frag.x[3]), __half2float(a_frag.x[4]),
@@ -117,16 +171,6 @@ __global__ void hgemm_v2_kernel(const half *__restrict__ A, const half *__restri
            __half2float(b_frag.x[4]), __half2float(b_frag.x[5]), __half2float(b_frag.x[6]), __half2float(b_frag.x[7]),
            c_frag.num_storage_elements, c_frag.x[0], c_frag.x[1], c_frag.x[2], c_frag.x[3], c_frag.x[4], c_frag.x[5],
            c_frag.x[6], c_frag.x[7]);
-
-    // if (bx == 0 && by == 0 && threadIdx.x == 0) {
-    //     printf("C:\n");
-    //     for (int i = 0; i < 16 * 16; i++) {
-    //         printf("%.2f, ", __half2float(C[i]));
-    //         if ((i + 1) % 16 == 0) {
-    //             printf("\n");
-    //         }
-    //     }
-    // }
 #endif
 }
 
@@ -464,6 +508,120 @@ void hgemm_v4(const half *A, const half *B, half *C, int M, int N, int K) {
     CHECK_CUDA(cudaGetLastError());
 }
 
+__device__ __forceinline__ void ldmatrix(uint &dst, half *src) {
+    uint32_t smem_ptr = __cvta_generic_to_shared(src);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%0}, [%1];\n" : "=r"(dst) : "r"(smem_ptr));
+}
+
+__device__ __forceinline__ void ldmatrix(uint2 &dst, half *src) {
+    uint32_t smem_ptr = __cvta_generic_to_shared(src);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];\n"
+                 : "=r"(dst.x), "=r"(dst.y)
+                 : "r"(smem_ptr));
+}
+
+__device__ __forceinline__ void ldmatrix(uint4 &dst, half *src) {
+    uint32_t smem_ptr = __cvta_generic_to_shared(src);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+                 : "=r"(dst.x), "=r"(dst.y), "=r"(dst.z), "=r"(dst.w)
+                 : "r"(smem_ptr));
+}
+
+__device__ __forceinline__ void ldmatrix_trans(uint &dst, half *src) {
+    uint32_t smem_ptr = __cvta_generic_to_shared(src);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16 {%0}, [%1];\n" : "=r"(dst) : "r"(smem_ptr));
+}
+
+__device__ __forceinline__ void ldmatrix_trans(uint2 &dst, half *src) {
+    uint32_t smem_ptr = __cvta_generic_to_shared(src);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0, %1}, [%2];\n"
+                 : "=r"(dst.x), "=r"(dst.y)
+                 : "r"(smem_ptr));
+}
+
+__device__ __forceinline__ void ldmatrix_trans(uint4 &dst, half *src) {
+    uint32_t smem_ptr = __cvta_generic_to_shared(src);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+                 : "=r"(dst.x), "=r"(dst.y), "=r"(dst.z), "=r"(dst.w)
+                 : "r"(smem_ptr));
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-mma
+__device__ __forceinline__ void mma_m16n8k16(uint4 &d, uint4 a, uint2 b, uint4 c) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                 "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\n"
+                 : "=r"(d.x), "=r"(d.y), "=r"(d.z), "=r"(d.w)
+                 : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(b.x), "r"(b.y), "r"(c.x), "r"(c.y), "r"(c.z), "r"(c.w));
+}
+
+// mma kernel
+template <int MMA_M, int MMA_N, int MMA_K>
+__global__ void hgemm_v5_kernel(const half *__restrict__ A, const half *__restrict__ B, half *__restrict__ C, int M,
+                                int N, int K) {
+    static_assert(MMA_M == 16 && MMA_N == 8 && MMA_K == 16, "unimplemented: only support m16n8k16");
+
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
+    const int tx = threadIdx.x;
+    const int tid = tx;
+
+    __shared__ half s_A[MMA_M][MMA_K]; // 16 * 16
+    __shared__ half s_B[MMA_K][MMA_N]; // 16 * 8
+
+    const half *A_block = A + by * MMA_M * K;
+    const half *B_block = B + bx * MMA_N;
+    half *C_block = C + by * MMA_M * N + bx * MMA_N;
+
+    half a_frag[8];
+    half b_frag[4];
+    float c_frag[4]{};
+
+    for (int k = 0; k < K; k += MMA_K) {
+        const int A_x = tid * 8 % MMA_K;
+        const int A_y = tid * 8 / MMA_K;
+        *(float4 *)&s_A[A_y][A_x] = *(float4 *)&A_block[A_y * K + A_x];
+
+        const int B_x = tid * 4 % MMA_N;
+        const int B_y = tid * 4 / MMA_N;
+        *(float2 *)&s_B[B_y][B_x] = *(float2 *)&B_block[B_y * N + B_x];
+
+        __syncthreads();
+
+        ldmatrix(*(uint4 *)a_frag, &s_A[tid % MMA_M][(tid / MMA_M) * 8]);
+        ldmatrix_trans(*(uint2 *)b_frag, &s_B[tid % MMA_K][0]);
+
+        mma_m16n8k16(*(uint4 *)c_frag, *(uint4 *)a_frag, *(uint2 *)b_frag, *(uint4 *)c_frag);
+
+        A_block += MMA_K;
+        B_block += MMA_K * N;
+    }
+
+    const int C_x = tid * 2 % MMA_N;
+    const int C_y = tid * 2 / MMA_N;
+
+#pragma unroll
+    for (int i = 0; i < 2; i++) {
+        *(half2 *)&C_block[C_y * N + C_x] = __float22half2_rn(*(float2 *)&c_frag[i * 2]);
+        C_block += (WARP_SIZE * 2 / MMA_N) * N;
+    }
+
+#ifdef HGEMM_DEBUG
+    printf("block (%d, %d) thread (%d, %d) a_frag: [%.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f] b_frag: [%.2f, "
+           "%.2f, %.2f, %.2f] c_frag: [%.2f, %.2f, %.2f, %.2f]\n",
+           bx, by, threadIdx.x, threadIdx.y, __half2float(a_frag[0]), __half2float(a_frag[1]), __half2float(a_frag[2]),
+           __half2float(a_frag[3]), __half2float(a_frag[4]), __half2float(a_frag[5]), __half2float(a_frag[6]),
+           __half2float(a_frag[7]), __half2float(b_frag[0]), __half2float(b_frag[1]), __half2float(b_frag[2]),
+           __half2float(b_frag[3]), c_frag[0], c_frag[1], c_frag[2], c_frag[3]);
+#endif
+}
+
+template <int MMA_M = 16, int MMA_N = 8, int MMA_K = 16>
+void hgemm_v5(const half *A, const half *B, half *C, int M, int N, int K) {
+    dim3 grid_dim(ceil_div(N, MMA_N), ceil_div(M, MMA_M));
+    hgemm_v5_kernel<MMA_M, MMA_N, MMA_K><<<grid_dim, WARP_SIZE>>>(A, B, C, M, N, K);
+    CHECK_CUDA(cudaGetLastError());
+}
+
 void hgemm_cublas(cublasHandle_t handle, const half *A, const half *B, half *C, int M, int N, int K) {
     const half alpha = __float2half(1);
     const half beta = __float2half(0);
@@ -523,13 +681,17 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
                                 int K) { hgemm_cublas(handle, A, B, C, M, N, K); }},
             // MAKE_ITEM(hgemm_v1),
 
-            MAKE_ITEM(hgemm_v2<16, 16, 16>),
-            // MAKE_ITEM(hgemm_v2<32, 8, 16>),
-            // MAKE_ITEM(hgemm_v2<8, 32, 16>),
+            // MAKE_ITEM(hgemm_v2<16, 16, 16>),
+            // // MAKE_ITEM(hgemm_v2<32, 8, 16>),
+            // // MAKE_ITEM(hgemm_v2<8, 32, 16>),
 
-            MAKE_ITEM(hgemm_v3<128, 128, 32, 2, 2>),
+            // MAKE_ITEM(hgemm_v3<128, 128, 32, 2, 2>),
 
-            MAKE_ITEM(hgemm_v4<128, 128, 32, 2, 2, 2>),
+            // MAKE_ITEM(hgemm_v4<128, 128, 32, 2, 2, 2>),
+
+            MAKE_ITEM(hgemm_v5<>),
+
+            // MAKE_ITEM(hgemm),
         };
 
 #undef MAKE_ITEM
@@ -608,10 +770,17 @@ void save_result(const char *save_path, const std::vector<PerfRecord> &all_recor
 }
 
 int main(int argc, char **argv) {
+
+#ifdef HGEMM_DEBUG
+    perf(16, 8, 16);
+    return 0;
+#endif
+
     // square matrix
     {
         std::vector<PerfRecord> all_records;
-        const int dims[]{1024, 2048, 3072, 4096, 6144, 8192};
+        // const int dims[]{1024, 2048, 3072, 4096, 6144, 8192};
+        const int dims[] = {4096};
         for (int d : dims) {
             auto records = perf(d, d, d);
             all_records.insert(all_records.end(), records.begin(), records.end());
