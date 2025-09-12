@@ -164,35 +164,34 @@ each sub-tiles, one thread only handles 16 bytes at a time.
 
     auto pipeline = cuda::make_pipeline();
 
+    // utils for global -> shared
+    static_assert((BM * BK) % (NUM_THREADS * 4) == 0, "unimplemented: corrupted load of A");
+    static_assert(BK <= NUM_THREADS * 4, "unimplemented: BK is too large");
+    constexpr int A_LOAD_TILE_Y = NUM_THREADS * 4 / BK;
+    const int A_x = tid * 4 % BK;
+    const int A_y = tid * 4 / BK;
+
+    static_assert((BK * BN) % (NUM_THREADS * 4) == 0, "unimplemented: corrupted load of B");
+    static_assert(BN <= NUM_THREADS * 4, "unimplemented: BN is too large");
+    constexpr int B_LOAD_TILE_Y = NUM_THREADS * 4 / BN;
+    const int B_x = tid * 4 % BN;
+    const int B_y = tid * 4 / BN;
+
     for (int k = 0; k < K; k += BK) {
         pipeline.producer_acquire();
 
         // load BM * BK tile of A into shared memory
-        {
-            static_assert((BM * BK) % (NUM_THREADS * 4) == 0, "unimplemented: corrupted load of A");
-            static_assert(BK <= NUM_THREADS * 4, "unimplemented: BK is too large");
-            constexpr int A_LOAD_TILE_X = BK / 4;
-            constexpr int A_LOAD_TILE_Y = NUM_THREADS / A_LOAD_TILE_X;
-            const int x = tid % A_LOAD_TILE_X * 4;
 #pragma unroll
-            for (int y_start = 0; y_start < BM; y_start += A_LOAD_TILE_Y) {
-                const int y = y_start + tid / A_LOAD_TILE_X;
-                cuda::memcpy_async((float4 *)&s_A[y][x], (float4 *)&A_block[y * K + x], sizeof(float4), pipeline);
-            }
+        for (int y_start = 0; y_start < BM; y_start += A_LOAD_TILE_Y) {
+            const int y = y_start + A_y;
+            cuda::memcpy_async((float4 *)&s_A[y][A_x], (float4 *)&A_block[y * K + A_x], sizeof(float4), pipeline);
         }
 
         // load BK * BN tile of B into shared memory
-        {
-            static_assert((BK * BN) % (NUM_THREADS * 4) == 0, "unimplemented: corrupted load of B");
-            static_assert(BN <= NUM_THREADS * 4, "unimplemented: BN is too large");
-            constexpr int B_LOAD_TILE_X = BN / 4;
-            constexpr int B_LOAD_TILE_Y = NUM_THREADS / B_LOAD_TILE_X;
-            const int x = tid % B_LOAD_TILE_X * 4;
 #pragma unroll
-            for (int y_start = 0; y_start < BK; y_start += B_LOAD_TILE_Y) {
-                const int y = y_start + tid / B_LOAD_TILE_X;
-                cuda::memcpy_async((float4 *)&s_B[y][x], (float4 *)&B_block[y * N + x], sizeof(float4), pipeline);
-            }
+        for (int y_start = 0; y_start < BK; y_start += B_LOAD_TILE_Y) {
+            const int y = y_start + B_y;
+            cuda::memcpy_async((float4 *)&s_B[y][B_x], (float4 *)&B_block[y * N + B_x], sizeof(float4), pipeline);
         }
 
         pipeline.producer_commit();

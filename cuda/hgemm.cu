@@ -265,34 +265,33 @@ warp tiling: (WM = 2 * WMMA_M, WN = 2 * WMMA_N)
         }
     }
 
+    // utils for global -> shared
+    static_assert((BM * BK) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of A");
+    static_assert(BK <= NUM_THREADS * 8, "unimplemented: BK is too large");
+    constexpr int A_LOAD_TILE_Y = NUM_THREADS * 8 / BK;
+    const int A_x = tid * 8 % BK;
+    const int A_y = tid * 8 / BK;
+
+    static_assert((BK * BN) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of B");
+    static_assert(BN <= NUM_THREADS * 8, "unimplemented: BN is too large");
+    constexpr int B_LOAD_TILE_Y = NUM_THREADS * 8 / BN;
+    const int B_x = tid * 8 % BN;
+    const int B_y = tid * 8 / BN;
+
     for (int k = 0; k < K; k += BK) {
 
         // load BM * BK tile of A into shared memory
-        {
-            static_assert((BM * BK) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of A");
-            static_assert(BK <= NUM_THREADS * 8, "unimplemented: BK is too large");
-            constexpr int A_LOAD_TILE_X = BK / 8;
-            constexpr int A_LOAD_TILE_Y = NUM_THREADS / A_LOAD_TILE_X;
-            const int x = tid % A_LOAD_TILE_X * 8;
 #pragma unroll
-            for (int y_start = 0; y_start < BM; y_start += A_LOAD_TILE_Y) {
-                const int y = y_start + tid / A_LOAD_TILE_X;
-                cp_async_cg((float4 *)&s_A[y][x], (float4 *)&A_block[y * K + x]);
-            }
+        for (int y_start = 0; y_start < BM; y_start += A_LOAD_TILE_Y) {
+            const int y = y_start + A_y;
+            cp_async_cg((float4 *)&s_A[y][A_x], (float4 *)&A_block[y * K + A_x]);
         }
 
         // load BK * BN tile of B into shared memory
-        {
-            static_assert((BK * BN) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of B");
-            static_assert(BN <= NUM_THREADS * 8, "unimplemented: BN is too large");
-            constexpr int B_LOAD_TILE_X = BN / 8;
-            constexpr int B_LOAD_TILE_Y = NUM_THREADS / B_LOAD_TILE_X;
-            const int x = tid % B_LOAD_TILE_X * 8;
 #pragma unroll
-            for (int y_start = 0; y_start < BK; y_start += B_LOAD_TILE_Y) {
-                const int y = y_start + tid / B_LOAD_TILE_X;
-                cp_async_cg((float4 *)&s_B[y][x], (float4 *)&B_block[y * N + x]);
-            }
+        for (int y_start = 0; y_start < BK; y_start += B_LOAD_TILE_Y) {
+            const int y = y_start + B_y;
+            cp_async_cg((float4 *)&s_B[y][B_x], (float4 *)&B_block[y * N + B_x]);
         }
 
         cp_async_commit_group();
@@ -397,17 +396,15 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
     // ===== fetch block =====
     static_assert((BM * BK) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of A");
     static_assert(BK <= NUM_THREADS * 8, "unimplemented: BK is too large");
-    constexpr int A_LOAD_TILE_X = BK / 8;
-    constexpr int A_LOAD_TILE_Y = NUM_THREADS / A_LOAD_TILE_X;
-    const int A_x = tid % A_LOAD_TILE_X * 8;
-    const int A_y = tid / A_LOAD_TILE_X;
+    constexpr int A_LOAD_TILE_Y = NUM_THREADS * 8 / BK;
+    const int A_x = tid * 8 % BK;
+    const int A_y = tid * 8 / BK;
 
     static_assert((BK * BN) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of B");
     static_assert(BN <= NUM_THREADS * 8, "unimplemented: BN is too large");
-    constexpr int B_LOAD_TILE_X = BN / 8;
-    constexpr int B_LOAD_TILE_Y = NUM_THREADS / B_LOAD_TILE_X;
-    const int B_x = tid % B_LOAD_TILE_X * 8;
-    const int B_y = tid / B_LOAD_TILE_X;
+    constexpr int B_LOAD_TILE_Y = NUM_THREADS * 8 / BN;
+    const int B_x = tid * 8 % BN;
+    const int B_y = tid * 8 / BN;
 
     auto fetch_block = [&](int i) {
         const int stage = i % STAGES;
@@ -681,13 +678,13 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
                                 int K) { hgemm_cublas(handle, A, B, C, M, N, K); }},
             // MAKE_ITEM(hgemm_v1),
 
-            // MAKE_ITEM(hgemm_v2<16, 16, 16>),
-            // // MAKE_ITEM(hgemm_v2<32, 8, 16>),
-            // // MAKE_ITEM(hgemm_v2<8, 32, 16>),
+            MAKE_ITEM(hgemm_v2<16, 16, 16>),
+            // MAKE_ITEM(hgemm_v2<32, 8, 16>),
+            // MAKE_ITEM(hgemm_v2<8, 32, 16>),
 
-            // MAKE_ITEM(hgemm_v3<128, 128, 32, 2, 2>),
+            MAKE_ITEM(hgemm_v3<128, 128, 32, 2, 2>),
 
-            // MAKE_ITEM(hgemm_v4<128, 128, 32, 2, 2, 2>),
+            MAKE_ITEM(hgemm_v4<128, 128, 32, 2, 2, 2>),
 
             MAKE_ITEM(hgemm_v5<>),
 
