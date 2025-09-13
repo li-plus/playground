@@ -176,7 +176,8 @@ wmma layout:
 
 template <int WMMA_M = 16, int WMMA_N = 16, int WMMA_K = 16>
 void hgemm_v2(const half *A, const half *B, half *C, int M, int N, int K) {
-    dim3 grid_dim(ceil_div(N, WMMA_N), ceil_div(M, WMMA_M));
+    CHECK(M % WMMA_M == 0 && N % WMMA_N == 0 && K % WMMA_K == 0) << "unimplemented: invalid matrix dimensions";
+    dim3 grid_dim(N / WMMA_N, M / WMMA_M);
     hgemm_v2_kernel<WMMA_M, WMMA_N, WMMA_K><<<grid_dim, WARP_SIZE>>>(A, B, C, M, N, K);
     CHECK_CUDA(cudaGetLastError());
 }
@@ -344,11 +345,9 @@ warp tiling: (WM = 2 * WMMA_M, WN = 2 * WMMA_N)
 template <int BM = 64, int BN = 64, int BK = 64, int WX = 1, int WY = 1, int WMMA_M = 16, int WMMA_N = 16,
           int WMMA_K = 16, int PAD_A = 16, int PAD_B = 16>
 void hgemm_v3(const half *A, const half *B, half *C, int M, int N, int K) {
-    CHECK(N % BN == 0 && M % BM == 0 && K % BK == 0) << "unimplemented: invalid matrix dimensions";
-
+    CHECK(M % BM == 0 && N % BN == 0 && K % BK == 0) << "unimplemented: invalid matrix dimensions";
     dim3 grid_dim(N / BN, M / BM);
     constexpr int block_dim = WX * WY * WARP_SIZE;
-
     hgemm_v3_kernel<BM, BN, BK, WX, WY, WMMA_M, WMMA_N, WMMA_K, PAD_A, PAD_B>
         <<<grid_dim, block_dim>>>(A, B, C, M, N, K);
     CHECK_CUDA(cudaGetLastError());
@@ -495,11 +494,9 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
 template <int BM = 64, int BN = 64, int BK = 64, int WX = 1, int WY = 1, int STAGES = 2, int WMMA_M = 16,
           int WMMA_N = 16, int WMMA_K = 16, int PAD_A = 16, int PAD_B = 16>
 void hgemm_v4(const half *A, const half *B, half *C, int M, int N, int K) {
-    CHECK(N % BN == 0 && M % BM == 0 && K % BK == 0) << "unimplemented: invalid matrix dimensions";
-
+    CHECK(M % BM == 0 && N % BN == 0 && K % BK == 0) << "unimplemented: invalid matrix dimensions";
     dim3 grid_dim(N / BN, M / BM);
     constexpr int block_dim = WX * WY * WARP_SIZE;
-
     hgemm_v4_kernel<BM, BN, BK, WX, WY, STAGES, WMMA_M, WMMA_N, WMMA_K, PAD_A, PAD_B>
         <<<grid_dim, block_dim>>>(A, B, C, M, N, K);
     CHECK_CUDA(cudaGetLastError());
@@ -553,8 +550,8 @@ __device__ __forceinline__ void mma_m16n8k16(uint4 &d, uint4 a, uint2 b, uint4 c
 
 // mma kernel
 template <int MMA_M, int MMA_N, int MMA_K>
-__global__ void hgemm_v5_kernel(const half *__restrict__ A, const half *__restrict__ B, half *__restrict__ C, int M,
-                                int N, int K) {
+__global__ void hgemm_mma_v1_kernel(const half *__restrict__ A, const half *__restrict__ B, half *__restrict__ C, int M,
+                                    int N, int K) {
     static_assert(MMA_M == 16 && MMA_N == 8 && MMA_K == 16, "unimplemented: only support m16n8k16");
 
     const int bx = blockIdx.x;
@@ -613,9 +610,206 @@ __global__ void hgemm_v5_kernel(const half *__restrict__ A, const half *__restri
 }
 
 template <int MMA_M = 16, int MMA_N = 8, int MMA_K = 16>
-void hgemm_v5(const half *A, const half *B, half *C, int M, int N, int K) {
-    dim3 grid_dim(ceil_div(N, MMA_N), ceil_div(M, MMA_M));
-    hgemm_v5_kernel<MMA_M, MMA_N, MMA_K><<<grid_dim, WARP_SIZE>>>(A, B, C, M, N, K);
+void hgemm_mma_v1(const half *A, const half *B, half *C, int M, int N, int K) {
+    CHECK(M % MMA_M == 0 && N % MMA_N == 0 && K % MMA_K == 0) << "unimplemented: invalid matrix dimensions";
+    dim3 grid_dim(N / MMA_N, M / MMA_M);
+    hgemm_mma_v1_kernel<MMA_M, MMA_N, MMA_K><<<grid_dim, WARP_SIZE>>>(A, B, C, M, N, K);
+    CHECK_CUDA(cudaGetLastError());
+}
+
+// mma kernel
+template <int BM, int BN, int BK, int WX, int WY, int STAGES, bool SWIZZLE, int PAD_A, int PAD_B, int MMA_M, int MMA_N,
+          int MMA_K>
+__global__ void __launch_bounds__(WX *WY *WARP_SIZE)
+    hgemm_mma_v2_kernel(const half *__restrict__ A, const half *__restrict__ B, half *__restrict__ C, int M, int N,
+                        int K) {
+    static_assert(MMA_M == 16 && MMA_N == 8 && MMA_K == 16, "unimplemented: only support m16n8k16");
+
+    static_assert(BM % (WY * MMA_M) == 0 && BN % (WX * MMA_N) == 0 && BK % MMA_K == 0,
+                  "unimplemented: invalid template parameters");
+
+    static_assert(!(SWIZZLE && (PAD_A || PAD_B)), "unimplemented: SWIZZLE is incompatible with PAD_A/PAD_B");
+
+    constexpr int NUM_THREADS = WX * WY * WARP_SIZE;
+    static_assert(32 <= NUM_THREADS && NUM_THREADS <= 1024, "unimplemented: invalid number of threads");
+
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
+    const int tx = threadIdx.x;
+    const int tid = tx;
+
+    const int wid = tid / WARP_SIZE; // warp_id
+    const int wx = wid % WX;
+    const int wy = wid / WX;
+
+    const int lid = tid % WARP_SIZE; // lane_id
+
+    __shared__ half s_A[STAGES][BM][BK + PAD_A];
+    __shared__ half s_B[STAGES][BK][BN + PAD_B];
+
+    constexpr int NUM_TILES_M = BM / (WY * MMA_M);
+    constexpr int NUM_TILES_N = BN / (WX * MMA_N);
+
+    uint4 c_frags[NUM_TILES_M][NUM_TILES_N]{};
+
+    // swizzle
+    constexpr int SWIZZLE_M = 3; // 2^3=8 elements as a unit
+    constexpr int SWIZZLE_S = 3; // 2^3=8 elements per row
+
+    // ===== fetch block =====
+    static_assert((BM * BK) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of A");
+    static_assert(BK <= NUM_THREADS * 8, "unimplemented: BK is too large");
+    constexpr int A_LOAD_TILE_Y = NUM_THREADS * 8 / BK;
+    const int A_x = tid * 8 % BK;
+    const int A_y = tid * 8 / BK;
+
+    static_assert((BK * BN) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of B");
+    static_assert(BN <= NUM_THREADS * 8, "unimplemented: BN is too large");
+    constexpr int B_LOAD_TILE_Y = NUM_THREADS * 8 / BN;
+    const int B_x = tid * 8 % BN;
+    const int B_y = tid * 8 / BN;
+
+    auto fetch_block = [&](int i) {
+        const int stage = i % STAGES;
+
+        // load BM * BK tile of A into shared memory
+        const half *A_block = A + by * BM * K + i * BK;
+#pragma unroll
+        for (int y_start = 0; y_start < BM; y_start += A_LOAD_TILE_Y) {
+            const int y = y_start + A_y;
+            if constexpr (SWIZZLE) {
+                const int swizzle_idx = (y * BK + A_x) >> SWIZZLE_M;
+                const int swizzle_y = swizzle_idx >> SWIZZLE_S;
+                const int swizzle_x = (swizzle_idx ^ swizzle_y) & ((1 << SWIZZLE_S) - 1);
+                cp_async_cg((float4 *)&s_A[stage][0][((swizzle_y << SWIZZLE_S) + swizzle_x) << SWIZZLE_M],
+                            (float4 *)&A_block[y * K + A_x]);
+            } else {
+                cp_async_cg((float4 *)&s_A[stage][y][A_x], (float4 *)&A_block[y * K + A_x]);
+            }
+        }
+
+        // load BK * BN tile of B into shared memory
+        const half *B_block = B + bx * BN + i * BK * N;
+#pragma unroll
+        for (int y_start = 0; y_start < BK; y_start += B_LOAD_TILE_Y) {
+            const int y = y_start + B_y;
+            if constexpr (SWIZZLE) {
+                const int swizzle_idx = (y * BN + B_x) >> SWIZZLE_M;
+                const int swizzle_y = swizzle_idx >> SWIZZLE_S;
+                const int swizzle_x = (swizzle_idx ^ swizzle_y) & ((1 << SWIZZLE_S) - 1);
+                cp_async_cg((float4 *)&s_B[stage][0][((swizzle_y << SWIZZLE_S) + swizzle_x) << SWIZZLE_M],
+                            (float4 *)&B_block[y * N + B_x]);
+            } else {
+                cp_async_cg((float4 *)&s_B[stage][y][B_x], (float4 *)&B_block[y * N + B_x]);
+            }
+        }
+    };
+
+    // ===== mma =====
+    auto mma_compute = [&](int i) {
+        const int stage = i % STAGES;
+
+#pragma unroll
+        for (int wk = 0; wk < BK; wk += MMA_K) {
+            uint4 a_frags[NUM_TILES_M];
+            uint2 b_frags[NUM_TILES_N];
+
+#pragma unroll
+            for (int wm = 0; wm < NUM_TILES_M; wm++) {
+                const int row_offset = (wm * WY + wy) * MMA_M + lid % MMA_M;
+                const int col_offset = wk + (lid / MMA_M) * 8;
+                if constexpr (SWIZZLE) {
+                    const int swizzle_idx = (row_offset * BK + col_offset) >> SWIZZLE_M;
+                    const int swizzle_y = swizzle_idx >> SWIZZLE_S;
+                    const int swizzle_x = (swizzle_idx ^ swizzle_y) & ((1 << SWIZZLE_S) - 1);
+                    ldmatrix(a_frags[wm], &s_A[stage][0][((swizzle_y << SWIZZLE_S) + swizzle_x) << SWIZZLE_M]);
+                } else {
+                    ldmatrix(a_frags[wm], &s_A[stage][row_offset][col_offset]);
+                }
+            }
+
+#pragma unroll
+            for (int wn = 0; wn < NUM_TILES_N; wn++) {
+                const int row_offset = wk + lid % MMA_K;
+                const int col_offset = (wn * WX + wx) * MMA_N;
+                if constexpr (SWIZZLE) {
+                    const int swizzle_idx = (row_offset * BN + col_offset) >> SWIZZLE_M;
+                    const int swizzle_y = swizzle_idx >> SWIZZLE_S;
+                    const int swizzle_x = (swizzle_idx ^ swizzle_y) & ((1 << SWIZZLE_S) - 1);
+                    ldmatrix_trans(b_frags[wn], &s_B[stage][0][((swizzle_y << SWIZZLE_S) + swizzle_x) << SWIZZLE_M]);
+                } else {
+                    ldmatrix_trans(b_frags[wn], &s_B[stage][row_offset][col_offset]);
+                }
+            }
+
+#pragma unroll
+            for (int wm = 0; wm < NUM_TILES_M; wm++) {
+#pragma unroll
+                for (int wn = 0; wn < NUM_TILES_N; wn++) {
+                    mma_m16n8k16(c_frags[wm][wn], a_frags[wm], b_frags[wn], c_frags[wm][wn]);
+                }
+            }
+        }
+    };
+
+#pragma unroll
+    for (int i = 0; i < STAGES - 1; i++) {
+        fetch_block(i);
+        cp_async_commit_group();
+    }
+
+    for (int i = STAGES - 1; i < K / BK; i++) {
+        if constexpr (STAGES > 1) {
+            cp_async_wait_group<STAGES - 2>();
+        }
+        __syncthreads();
+
+        fetch_block(i);
+        cp_async_commit_group();
+
+        if constexpr (STAGES == 1) {
+            cp_async_wait_group<0>();
+            __syncthreads();
+        }
+
+        mma_compute(i - (STAGES - 1));
+    }
+
+    if constexpr (STAGES > 1) {
+        cp_async_wait_group<0>();
+        __syncthreads();
+    }
+
+#pragma unroll
+    for (int i = -(STAGES - 1); i < 0; i++) {
+        mma_compute(K / BK + i);
+    }
+
+    // store sums to C
+    half *C_block = C + by * BM * N + bx * BN;
+    const int C_x = lid * 2 % MMA_N;
+    const int C_y = lid * 2 / MMA_N;
+#pragma unroll
+    for (int m = 0; m < NUM_TILES_M; m++) {
+#pragma unroll
+        for (int n = 0; n < NUM_TILES_N; n++) {
+            half *C_tile = C_block + (m * WY + wy) * MMA_M * N + (n * WX + wx) * MMA_N;
+#pragma unroll
+            for (int i = 0; i < 2; i++) {
+                *(half2 *)&C_tile[(C_y + i * 8) * N + C_x] = __float22half2_rn(((float2 *)&c_frags[m][n])[i]);
+            }
+        }
+    }
+}
+
+template <int BM, int BN, int BK, int WX, int WY, int STAGES, int SWIZZLE = false, int PAD_A = 0, int PAD_B = 0,
+          int MMA_M = 16, int MMA_N = 8, int MMA_K = 16>
+void hgemm_mma_v2(const half *A, const half *B, half *C, int M, int N, int K) {
+    CHECK(M % BM == 0 && N % BN == 0 && K % BK == 0) << "unimplemented: invalid matrix dimensions";
+    dim3 grid_dim(N / BN, M / BM);
+    constexpr int block_dim = WX * WY * WARP_SIZE;
+    hgemm_mma_v2_kernel<BM, BN, BK, WX, WY, STAGES, SWIZZLE, PAD_A, PAD_B, MMA_M, MMA_N, MMA_K>
+        <<<grid_dim, block_dim>>>(A, B, C, M, N, K);
     CHECK_CUDA(cudaGetLastError());
 }
 
@@ -686,7 +880,12 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
 
             MAKE_ITEM(hgemm_v4<128, 128, 32, 2, 2, 2>),
 
-            MAKE_ITEM(hgemm_v5<>),
+            // MAKE_ITEM(hgemm_mma_v1<>),
+
+            MAKE_ITEM(hgemm_mma_v2<128, 128, 32, 2, 2, 2>),
+            MAKE_ITEM(hgemm_mma_v2<128, 128, 32, 2, 2, 2, false, 8, 8>),
+
+            MAKE_ITEM(hgemm_mma_v2<128, 128, 32, 2, 2, 3, true>),
 
             // MAKE_ITEM(hgemm),
         };
