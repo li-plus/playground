@@ -21,6 +21,7 @@ template <typename T>
 __device__ __forceinline__ void cp_async_cg(T *dst, const T *src) {
     uint32_t smem_int_ptr = __cvta_generic_to_shared(dst);
     asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" ::"r"(smem_int_ptr), "l"(src), "n"(sizeof(T)));
+    // cp.async.cg.shared.global.L2::128B
 }
 
 __device__ __forceinline__ void cp_async_commit_group() { asm volatile("cp.async.commit_group;\n" ::); }
@@ -548,6 +549,11 @@ __device__ __forceinline__ void mma_m16n8k16(uint4 &d, uint4 a, uint2 b, uint4 c
                  : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(b.x), "r"(b.y), "r"(c.x), "r"(c.y), "r"(c.z), "r"(c.w));
 }
 
+template <typename T>
+__device__ __forceinline__ constexpr T ce_max(const T &a, const T &b) {
+    return a > b ? a : b;
+}
+
 // mma kernel
 template <int MMA_M, int MMA_N, int MMA_K>
 __global__ void hgemm_mma_v1_kernel(const half *__restrict__ A, const half *__restrict__ B, half *__restrict__ C, int M,
@@ -617,9 +623,16 @@ void hgemm_mma_v1(const half *A, const half *B, half *C, int M, int N, int K) {
     CHECK_CUDA(cudaGetLastError());
 }
 
+template <int _2_M, int _2_S>
+__device__ __forceinline__ constexpr int swizzle_permute(int index) {
+    const int swizzle_idx = index / _2_M;
+    const int swizzle_y = swizzle_idx / _2_S;
+    const int swizzle_x = (swizzle_idx ^ swizzle_y) % _2_S;
+    return (swizzle_y * _2_S + swizzle_x) * _2_M;
+}
+
 // mma kernel
-template <int BM, int BN, int BK, int WX, int WY, int STAGES, bool SWIZZLE, int PAD_A, int PAD_B, int MMA_M, int MMA_N,
-          int MMA_K>
+template <int BM, int BN, int BK, int WX, int WY, int STAGES, bool SWIZZLE, int MMA_M, int MMA_N, int MMA_K>
 __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
     hgemm_mma_v2_kernel(const half *__restrict__ A, const half *__restrict__ B, half *__restrict__ C, int M, int N,
                         int K) {
@@ -627,8 +640,6 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
 
     static_assert(BM % (WY * MMA_M) == 0 && BN % (WX * MMA_N) == 0 && BK % MMA_K == 0,
                   "unimplemented: invalid template parameters");
-
-    static_assert(!(SWIZZLE && (PAD_A || PAD_B)), "unimplemented: SWIZZLE is incompatible with PAD_A/PAD_B");
 
     constexpr int NUM_THREADS = WX * WY * WARP_SIZE;
     static_assert(32 <= NUM_THREADS && NUM_THREADS <= 1024, "unimplemented: invalid number of threads");
@@ -644,8 +655,13 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
 
     const int lid = tid % WARP_SIZE; // lane_id
 
-    __shared__ half s_A[STAGES][BM][BK + PAD_A];
-    __shared__ half s_B[STAGES][BK][BN + PAD_B];
+    extern __shared__ half shm[];
+
+    auto s_A = (half(*)[BM][BK])shm;
+    auto s_B = (half(*)[BK][BN])(shm + STAGES * BM * BK);
+
+    // __shared__ half s_A[STAGES][BM][BK];
+    // __shared__ half s_B[STAGES][BK][BN];
 
     constexpr int NUM_TILES_M = BM / (WY * MMA_M);
     constexpr int NUM_TILES_N = BN / (WX * MMA_N);
@@ -653,8 +669,9 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
     uint4 c_frags[NUM_TILES_M][NUM_TILES_N]{};
 
     // swizzle
-    constexpr int SWIZZLE_M = 3; // 2^3=8 elements as a unit
-    constexpr int SWIZZLE_S = 3; // 2^3=8 elements per row
+    constexpr int SWIZZLE_2_M = 8;                             // 2^3=8 elements as a unit
+    constexpr int SWIZZLE_A_2_S = ce_max(8, BK / SWIZZLE_2_M); // at least 2^3=8 elements per row
+    constexpr int SWIZZLE_B_2_S = ce_max(8, BN / SWIZZLE_2_M); // at least 2^3=8 elements per row
 
     // ===== fetch block =====
     static_assert((BM * BK) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of A");
@@ -678,11 +695,8 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
         for (int y_start = 0; y_start < BM; y_start += A_LOAD_TILE_Y) {
             const int y = y_start + A_y;
             if constexpr (SWIZZLE) {
-                const int swizzle_idx = (y * BK + A_x) >> SWIZZLE_M;
-                const int swizzle_y = swizzle_idx >> SWIZZLE_S;
-                const int swizzle_x = (swizzle_idx ^ swizzle_y) & ((1 << SWIZZLE_S) - 1);
-                cp_async_cg((float4 *)&s_A[stage][0][((swizzle_y << SWIZZLE_S) + swizzle_x) << SWIZZLE_M],
-                            (float4 *)&A_block[y * K + A_x]);
+                const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_A_2_S>(y * BK + A_x);
+                cp_async_cg((float4 *)&s_A[stage][0][offset], (float4 *)&A_block[y * K + A_x]);
             } else {
                 cp_async_cg((float4 *)&s_A[stage][y][A_x], (float4 *)&A_block[y * K + A_x]);
             }
@@ -694,11 +708,8 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
         for (int y_start = 0; y_start < BK; y_start += B_LOAD_TILE_Y) {
             const int y = y_start + B_y;
             if constexpr (SWIZZLE) {
-                const int swizzle_idx = (y * BN + B_x) >> SWIZZLE_M;
-                const int swizzle_y = swizzle_idx >> SWIZZLE_S;
-                const int swizzle_x = (swizzle_idx ^ swizzle_y) & ((1 << SWIZZLE_S) - 1);
-                cp_async_cg((float4 *)&s_B[stage][0][((swizzle_y << SWIZZLE_S) + swizzle_x) << SWIZZLE_M],
-                            (float4 *)&B_block[y * N + B_x]);
+                const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_B_2_S>(y * BN + B_x);
+                cp_async_cg((float4 *)&s_B[stage][0][offset], (float4 *)&B_block[y * N + B_x]);
             } else {
                 cp_async_cg((float4 *)&s_B[stage][y][B_x], (float4 *)&B_block[y * N + B_x]);
             }
@@ -714,32 +725,46 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
             uint4 a_frags[NUM_TILES_M];
             uint2 b_frags[NUM_TILES_N];
 
+            auto load_a_frags = [&] {
 #pragma unroll
-            for (int wm = 0; wm < NUM_TILES_M; wm++) {
-                const int row_offset = (wm * WY + wy) * MMA_M + lid % MMA_M;
-                const int col_offset = wk + (lid / MMA_M) * 8;
-                if constexpr (SWIZZLE) {
-                    const int swizzle_idx = (row_offset * BK + col_offset) >> SWIZZLE_M;
-                    const int swizzle_y = swizzle_idx >> SWIZZLE_S;
-                    const int swizzle_x = (swizzle_idx ^ swizzle_y) & ((1 << SWIZZLE_S) - 1);
-                    ldmatrix(a_frags[wm], &s_A[stage][0][((swizzle_y << SWIZZLE_S) + swizzle_x) << SWIZZLE_M]);
-                } else {
-                    ldmatrix(a_frags[wm], &s_A[stage][row_offset][col_offset]);
+                for (int wm = 0; wm < NUM_TILES_M; wm++) {
+                    const int row_offset = (wm * WY + wy) * MMA_M + lid % MMA_M;
+                    const int col_offset = wk + (lid / MMA_M) * 8;
+                    if constexpr (SWIZZLE) {
+                        const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_A_2_S>(row_offset * BK + col_offset);
+                        // if (bx == 0 && by == 0 && wid == 1 && i == 0 && wk == 0 && wm == 0) {
+                        //     printf("[tid %d] ldmatrix A (%d, %d)\n", tid, offset / 8 / 8, offset / 8 % 8);
+                        // }
+                        ldmatrix(a_frags[wm], &s_A[stage][0][offset]);
+                    } else {
+                        ldmatrix(a_frags[wm], &s_A[stage][row_offset][col_offset]);
+                    }
                 }
-            }
+            };
 
+            auto load_b_frags = [&] {
 #pragma unroll
-            for (int wn = 0; wn < NUM_TILES_N; wn++) {
-                const int row_offset = wk + lid % MMA_K;
-                const int col_offset = (wn * WX + wx) * MMA_N;
-                if constexpr (SWIZZLE) {
-                    const int swizzle_idx = (row_offset * BN + col_offset) >> SWIZZLE_M;
-                    const int swizzle_y = swizzle_idx >> SWIZZLE_S;
-                    const int swizzle_x = (swizzle_idx ^ swizzle_y) & ((1 << SWIZZLE_S) - 1);
-                    ldmatrix_trans(b_frags[wn], &s_B[stage][0][((swizzle_y << SWIZZLE_S) + swizzle_x) << SWIZZLE_M]);
-                } else {
-                    ldmatrix_trans(b_frags[wn], &s_B[stage][row_offset][col_offset]);
+                for (int wn = 0; wn < NUM_TILES_N; wn++) {
+                    const int row_offset = wk + lid % MMA_K;
+                    const int col_offset = (wn * WX + wx) * MMA_N;
+                    if constexpr (SWIZZLE) {
+                        const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_B_2_S>(row_offset * BN + col_offset);
+                        // if (bx == 0 && by == 0 && wid == 1 && i == 0 && wk == 0 && wn == 0) {
+                        //     printf("[tid %d] ldmatrix B (%d, %d)\n", tid, offset / 8 / 8, offset / 8 % 8);
+                        // }
+                        ldmatrix_trans(b_frags[wn], &s_B[stage][0][offset]);
+                    } else {
+                        ldmatrix_trans(b_frags[wn], &s_B[stage][row_offset][col_offset]);
+                    }
                 }
+            };
+
+            if (wid % 2 == 1) {
+                load_a_frags();
+                load_b_frags();
+            } else {
+                load_b_frags();
+                load_a_frags();
             }
 
 #pragma unroll
@@ -802,14 +827,17 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
     }
 }
 
-template <int BM, int BN, int BK, int WX, int WY, int STAGES, int SWIZZLE = false, int PAD_A = 0, int PAD_B = 0,
-          int MMA_M = 16, int MMA_N = 8, int MMA_K = 16>
+template <int BM, int BN, int BK, int WX, int WY, int STAGES, int SWIZZLE = false, int MMA_M = 16, int MMA_N = 8,
+          int MMA_K = 16>
 void hgemm_mma_v2(const half *A, const half *B, half *C, int M, int N, int K) {
     CHECK(M % BM == 0 && N % BN == 0 && K % BK == 0) << "unimplemented: invalid matrix dimensions";
     dim3 grid_dim(N / BN, M / BM);
     constexpr int block_dim = WX * WY * WARP_SIZE;
-    hgemm_mma_v2_kernel<BM, BN, BK, WX, WY, STAGES, SWIZZLE, PAD_A, PAD_B, MMA_M, MMA_N, MMA_K>
-        <<<grid_dim, block_dim>>>(A, B, C, M, N, K);
+    constexpr int shared_mem_size = STAGES * (BM + BN) * BK * sizeof(half);
+    CHECK_CUDA(cudaFuncSetAttribute(hgemm_mma_v2_kernel<BM, BN, BK, WX, WY, STAGES, SWIZZLE, MMA_M, MMA_N, MMA_K>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size));
+    hgemm_mma_v2_kernel<BM, BN, BK, WX, WY, STAGES, SWIZZLE, MMA_M, MMA_N, MMA_K>
+        <<<grid_dim, block_dim, shared_mem_size>>>(A, B, C, M, N, K);
     CHECK_CUDA(cudaGetLastError());
 }
 
@@ -882,10 +910,14 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
 
             // MAKE_ITEM(hgemm_mma_v1<>),
 
-            MAKE_ITEM(hgemm_mma_v2<128, 128, 32, 2, 2, 2>),
-            MAKE_ITEM(hgemm_mma_v2<128, 128, 32, 2, 2, 2, false, 8, 8>),
+            // MAKE_ITEM(hgemm_mma_v2<128, 128, 32, 2, 2, 2>),
 
             MAKE_ITEM(hgemm_mma_v2<128, 128, 32, 2, 2, 3, true>),
+
+            // MAKE_ITEM(hgemm_mma_v2<256, 256, 32, 2, 2, 3, true>),
+            // MAKE_ITEM(hgemm_mma_v2<256, 256, 32, 2, 4, 3, true>),
+            // MAKE_ITEM(hgemm_mma_v2<256, 256, 32, 4, 2, 3, true>),
+            // MAKE_ITEM(hgemm_mma_v2<256, 256, 32, 4, 4, 3, true>),
 
             // MAKE_ITEM(hgemm),
         };
@@ -976,7 +1008,7 @@ int main(int argc, char **argv) {
     {
         std::vector<PerfRecord> all_records;
         // const int dims[]{1024, 2048, 3072, 4096, 6144, 8192};
-        const int dims[] = {4096};
+        const int dims[] = {8192};
         for (int d : dims) {
             auto records = perf(d, d, d);
             all_records.insert(all_records.end(), records.begin(), records.end());
