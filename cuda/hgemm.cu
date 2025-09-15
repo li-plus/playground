@@ -549,6 +549,13 @@ __device__ __forceinline__ void mma_m16n8k16(uint4 &d, uint4 a, uint2 b, uint4 c
                  : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(b.x), "r"(b.y), "r"(c.x), "r"(c.y), "r"(c.z), "r"(c.w));
 }
 
+__device__ __forceinline__ void mma_m16n8k16(uint2 &d, uint4 a, uint2 b, uint2 c) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 "
+                 "{%0, %1}, {%2, %3, %4, %5}, {%6, %7}, {%8, %9};\n"
+                 : "=r"(d.x), "=r"(d.y)
+                 : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(b.x), "r"(b.y), "r"(c.x), "r"(c.y));
+}
+
 template <typename T>
 __device__ __forceinline__ constexpr T ce_max(const T &a, const T &b) {
     return a > b ? a : b;
@@ -632,7 +639,8 @@ __device__ __forceinline__ constexpr int swizzle_permute(int index) {
 }
 
 // mma kernel
-template <int BM, int BN, int BK, int WX, int WY, int STAGES, bool SWIZZLE, int MMA_M, int MMA_N, int MMA_K>
+template <int BM, int BN, int BK, int WX, int WY, int STAGES, bool SWIZZLE, int BLOCK_SWIZZLE_SIZE, int MMA_M,
+          int MMA_N, int MMA_K>
 __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
     hgemm_mma_v2_kernel(const half *__restrict__ A, const half *__restrict__ B, half *__restrict__ C, int M, int N,
                         int K) {
@@ -644,8 +652,17 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
     constexpr int NUM_THREADS = WX * WY * WARP_SIZE;
     static_assert(32 <= NUM_THREADS && NUM_THREADS <= 1024, "unimplemented: invalid number of threads");
 
-    const int bx = blockIdx.x;
-    const int by = blockIdx.y;
+    int _bx = blockIdx.x;
+    int _by = blockIdx.y;
+    if constexpr (BLOCK_SWIZZLE_SIZE > 1) {
+        const int gx = gridDim.x;
+        const int bid = _by * gx + _bx;
+        _bx = bid / BLOCK_SWIZZLE_SIZE % gx;
+        _by = bid % BLOCK_SWIZZLE_SIZE + bid / gx / BLOCK_SWIZZLE_SIZE * BLOCK_SWIZZLE_SIZE;
+    }
+    const int bx = _bx;
+    const int by = _by;
+
     const int tx = threadIdx.x;
     const int tid = tx;
 
@@ -827,16 +844,17 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
     }
 }
 
-template <int BM, int BN, int BK, int WX, int WY, int STAGES, int SWIZZLE = false, int MMA_M = 16, int MMA_N = 8,
-          int MMA_K = 16>
+template <int BM, int BN, int BK, int WX, int WY, int STAGES, bool SWIZZLE = false, int BLOCK_SWIZZLE_SIZE = 1,
+          int MMA_M = 16, int MMA_N = 8, int MMA_K = 16>
 void hgemm_mma_v2(const half *A, const half *B, half *C, int M, int N, int K) {
     CHECK(M % BM == 0 && N % BN == 0 && K % BK == 0) << "unimplemented: invalid matrix dimensions";
     dim3 grid_dim(N / BN, M / BM);
     constexpr int block_dim = WX * WY * WARP_SIZE;
     constexpr int shared_mem_size = STAGES * (BM + BN) * BK * sizeof(half);
-    CHECK_CUDA(cudaFuncSetAttribute(hgemm_mma_v2_kernel<BM, BN, BK, WX, WY, STAGES, SWIZZLE, MMA_M, MMA_N, MMA_K>,
-                                    cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size));
-    hgemm_mma_v2_kernel<BM, BN, BK, WX, WY, STAGES, SWIZZLE, MMA_M, MMA_N, MMA_K>
+    CHECK_CUDA(cudaFuncSetAttribute(
+        hgemm_mma_v2_kernel<BM, BN, BK, WX, WY, STAGES, SWIZZLE, BLOCK_SWIZZLE_SIZE, MMA_M, MMA_N, MMA_K>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size));
+    hgemm_mma_v2_kernel<BM, BN, BK, WX, WY, STAGES, SWIZZLE, BLOCK_SWIZZLE_SIZE, MMA_M, MMA_N, MMA_K>
         <<<grid_dim, block_dim, shared_mem_size>>>(A, B, C, M, N, K);
     CHECK_CUDA(cudaGetLastError());
 }
@@ -846,6 +864,8 @@ void hgemm_cublas(cublasHandle_t handle, const half *A, const half *B, half *C, 
     const half beta = __float2half(0);
     CHECK_CUBLAS(cublasHgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, M, K, &alpha, B, N, A, K, &beta, C, N));
 }
+
+void hgemm(const half *A, const half *B, half *C, int M, int N, int K);
 
 struct PerfRecord {
     int M;
@@ -910,9 +930,7 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
 
             // MAKE_ITEM(hgemm_mma_v1<>),
 
-            // MAKE_ITEM(hgemm_mma_v2<128, 128, 32, 2, 2, 2>),
-
-            MAKE_ITEM(hgemm_mma_v2<128, 128, 32, 2, 2, 3, true>),
+            MAKE_ITEM(hgemm_mma_v2<128, 128, 32, 2, 2, 3, true, 2>),
 
             // MAKE_ITEM(hgemm_mma_v2<256, 256, 32, 2, 2, 3, true>),
             // MAKE_ITEM(hgemm_mma_v2<256, 256, 32, 2, 4, 3, true>),
