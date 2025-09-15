@@ -8,6 +8,11 @@
 // * https://zhuanlan.zhihu.com/p/671419093
 // CUTLASS docs: https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md
 
+// profile:
+// $ sudo -E $(which ncu) --set full -o profile -f -k hgemm_mma_v2 -s 2 -c 3 ./build/hgemm
+// $ sudo -E $(which ncu) --set full -o profile -f --kernel-id
+// ::regex:"ampere_h16816gemm_128x128_ldg8_stages_32x5_nn|hgemm_mma_v2":3 ./build/hgemm
+
 #include "common.h"
 #include <cuda_fp16.h>
 #include <functional>
@@ -682,8 +687,9 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
 
     constexpr int NUM_TILES_M = BM / (WY * MMA_M);
     constexpr int NUM_TILES_N = BN / (WX * MMA_N);
+    static_assert(NUM_TILES_N % 2 == 0, "unimplemented: NUM_TILES_N must be even");
 
-    uint4 c_frags[NUM_TILES_M][NUM_TILES_N]{};
+    uint2 c_frags[NUM_TILES_M][NUM_TILES_N]{};
 
     // swizzle
     constexpr int SWIZZLE_2_M = 8;                             // 2^3=8 elements as a unit
@@ -838,7 +844,7 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
             half *C_tile = C_block + (m * WY + wy) * MMA_M * N + (n * WX + wx) * MMA_N;
 #pragma unroll
             for (int i = 0; i < 2; i++) {
-                *(half2 *)&C_tile[(C_y + i * 8) * N + C_x] = __float22half2_rn(((float2 *)&c_frags[m][n])[i]);
+                *(half2 *)&C_tile[(C_y + i * 8) * N + C_x] = ((half2 *)&c_frags[m][n])[i];
             }
         }
     }
