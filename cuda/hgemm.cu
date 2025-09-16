@@ -8,15 +8,20 @@
 // * https://zhuanlan.zhihu.com/p/671419093
 // CUTLASS docs: https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md
 
+// clang-format off
 // profile:
 // $ sudo -E $(which ncu) --set full -o profile -f -k hgemm_mma_v2 -s 2 -c 3 ./build/hgemm
-// $ sudo -E $(which ncu) --set full -o profile -f --kernel-id
-// ::regex:"ampere_h16816gemm_128x128_ldg8_stages_32x5_nn|hgemm_mma_v2":3 ./build/hgemm
+// $ sudo -E $(which ncu) --set full -o profile -f --kernel-id ::regex:"ampere_.*|hgemm_mma_v2":3 ./build/hgemm
+// clang-format on
 
 #include "common.h"
+#include <cstdlib>
 #include <cuda_fp16.h>
 #include <functional>
+#include <getopt.h>
 #include <mma.h>
+#include <sstream>
+#include <string>
 
 // #define HGEMM_DEBUG
 
@@ -637,10 +642,10 @@ void hgemm_mma_v1(const half *A, const half *B, half *C, int M, int N, int K) {
 
 template <int _2_M, int _2_S>
 __device__ __forceinline__ constexpr int swizzle_permute(int index) {
-    const int swizzle_idx = index / _2_M;
-    const int swizzle_y = swizzle_idx / _2_S;
-    const int swizzle_x = (swizzle_idx ^ swizzle_y) % _2_S;
-    return (swizzle_y * _2_S + swizzle_x) * _2_M;
+    const int group_index = index / _2_M;
+    const int group_y = group_index / _2_S;
+    const int group_x = (group_index ^ group_y) % _2_S;
+    return (group_y * _2_S + group_x) * _2_M + index % _2_M;
 }
 
 // mma kernel
@@ -679,11 +684,8 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
 
     extern __shared__ half shm[];
 
-    auto s_A = (half(*)[BM][BK])shm;
-    auto s_B = (half(*)[BK][BN])(shm + STAGES * BM * BK);
-
-    // __shared__ half s_A[STAGES][BM][BK];
-    // __shared__ half s_B[STAGES][BK][BN];
+    auto s_A = (half(*)[BM][BK])shm;                      // [STAGES][BM][BK]
+    auto s_B = (half(*)[BK][BN])(shm + STAGES * BM * BK); // [STAGES][BK][BN];
 
     constexpr int NUM_TILES_M = BM / (WY * MMA_M);
     constexpr int NUM_TILES_N = BN / (WX * MMA_N);
@@ -692,9 +694,9 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
     uint2 c_frags[NUM_TILES_M][NUM_TILES_N]{};
 
     // swizzle
-    constexpr int SWIZZLE_2_M = 8;                             // 2^3=8 elements as a unit
-    constexpr int SWIZZLE_A_2_S = ce_max(8, BK / SWIZZLE_2_M); // at least 2^3=8 elements per row
-    constexpr int SWIZZLE_B_2_S = ce_max(8, BN / SWIZZLE_2_M); // at least 2^3=8 elements per row
+    constexpr int SWIZZLE_2_M = 8;                              // 2^3=8 elements as a unit
+    constexpr int SWIZZLE_A_2_S = ce_max(64, BK) / SWIZZLE_2_M; // at least 2^3=8 elements per row
+    constexpr int SWIZZLE_B_2_S = ce_max(64, BN) / SWIZZLE_2_M; // at least 2^3=8 elements per row
 
     // ===== fetch block =====
     static_assert((BM * BK) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of A");
@@ -752,7 +754,7 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
 #pragma unroll
                 for (int wm = 0; wm < NUM_TILES_M; wm++) {
                     const int row_offset = (wm * WY + wy) * MMA_M + lid % MMA_M;
-                    const int col_offset = wk + (lid / MMA_M) * 8;
+                    const int col_offset = wk + lid / MMA_M * 8;
                     if constexpr (SWIZZLE) {
                         const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_A_2_S>(row_offset * BK + col_offset);
                         // if (bx == 0 && by == 0 && wid == 1 && i == 0 && wk == 0 && wm == 0) {
@@ -865,6 +867,268 @@ void hgemm_mma_v2(const half *A, const half *B, half *C, int M, int N, int K) {
     CHECK_CUDA(cudaGetLastError());
 }
 
+// aggressive optimization for peak performance
+template <int BM, int BN, int BK, int WX, int WY, int STAGES, int BLOCK_SWIZZLE_SIZE, int MMA_M, int MMA_N, int MMA_K>
+__global__ void __launch_bounds__(WX *WY *WARP_SIZE)
+    hgemm_mma_v3_kernel(const half *__restrict__ A, const half *__restrict__ B, half *__restrict__ C, int M, int N,
+                        int K) {
+    static_assert(MMA_M == 16 && MMA_N == 8 && MMA_K == 16, "unimplemented: only support m16n8k16");
+
+    static_assert(BM % (WY * MMA_M) == 0 && BN % (WX * MMA_N * 2) == 0 && BK % MMA_K == 0,
+                  "unimplemented: invalid template parameters");
+
+    constexpr int NUM_THREADS = WX * WY * WARP_SIZE;
+    static_assert(32 <= NUM_THREADS && NUM_THREADS <= 1024, "unimplemented: invalid number of threads");
+    static_assert(STAGES > 1, "unimplemented: STAGES must be greater than 1");
+
+    int _bx = blockIdx.x;
+    int _by = blockIdx.y;
+    if constexpr (BLOCK_SWIZZLE_SIZE > 1) {
+        const int gx = gridDim.x;
+        const int bid = _by * gx + _bx;
+        _bx = bid / BLOCK_SWIZZLE_SIZE % gx;
+        _by = bid % BLOCK_SWIZZLE_SIZE + bid / gx / BLOCK_SWIZZLE_SIZE * BLOCK_SWIZZLE_SIZE;
+    }
+    const int bx = _bx;
+    const int by = _by;
+
+    const int tx = threadIdx.x;
+    const int tid = tx;
+
+    const int wid = tid / WARP_SIZE; // warp_id
+    const int wx = wid % WX;
+    const int wy = wid / WX;
+
+    const int lid = tid % WARP_SIZE; // lane_id
+
+    extern __shared__ half shm[];
+
+    auto s_A = (half(*)[BM][BK])shm;                      // [STAGES][BM][BK]
+    auto s_B = (half(*)[BK][BN])(shm + STAGES * BM * BK); // [STAGES][BK][BN]
+
+    constexpr int NUM_TILES_M = BM / (WY * MMA_M);
+    constexpr int NUM_TILES_N = BN / (WX * MMA_N * 2);
+
+    uint4 c_frags[NUM_TILES_M][NUM_TILES_N]{};
+
+    // swizzle
+    constexpr int SWIZZLE_2_M = 8;                              // 2^3=8 elements as a unit
+    constexpr int SWIZZLE_A_2_S = ce_max(64, BK) / SWIZZLE_2_M; // at least 2^3=8 elements per row
+    constexpr int SWIZZLE_B_2_S = ce_max(64, BN) / SWIZZLE_2_M; // at least 2^3=8 elements per row
+
+    // ===== fetch block =====
+    static_assert((BM * BK) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of A");
+    static_assert(BK <= NUM_THREADS * 8, "unimplemented: BK is too large");
+    constexpr int A_LOAD_TILE_Y = NUM_THREADS * 8 / BK;
+    const int A_x = tid * 8 % BK;
+    const int A_y = tid * 8 / BK;
+
+    static_assert((BK * BN) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of B");
+    static_assert(BN <= NUM_THREADS * 8, "unimplemented: BN is too large");
+    constexpr int B_LOAD_TILE_Y = NUM_THREADS * 8 / BN;
+    const int B_x = tid * 8 % BN;
+    const int B_y = tid * 8 / BN;
+
+    auto fetch_A_tile = [&](int k, int i) {
+        const int stage = k % STAGES;
+        const half *A_block = A + by * BM * K + k * BK;
+        const int y = i * A_LOAD_TILE_Y + A_y;
+        const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_A_2_S>(y * BK + A_x);
+        cp_async_cg((float4 *)&s_A[stage][0][offset], (float4 *)&A_block[y * K + A_x]);
+    };
+
+    auto fetch_B_tile = [&](int k, int i) {
+        const int stage = k % STAGES;
+        const half *B_block = B + bx * BN + k * BK * N;
+        const int y = i * B_LOAD_TILE_Y + B_y;
+        const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_B_2_S>(y * BN + B_x);
+        cp_async_cg((float4 *)&s_B[stage][0][offset], (float4 *)&B_block[y * N + B_x]);
+    };
+
+    auto fetch_block = [&](int k) {
+    // load BM * BK tile of A into shared memory
+#pragma unroll
+        for (int i = 0; i < BM / A_LOAD_TILE_Y; i++) {
+            fetch_A_tile(k, i);
+        }
+
+        // load BK * BN tile of B into shared memory
+#pragma unroll
+        for (int i = 0; i < BK / B_LOAD_TILE_Y; i++) {
+            fetch_B_tile(k, i);
+        }
+    };
+
+    auto mma_compute = [&](int k, int wk) {
+        const int stage = k % STAGES;
+
+        uint4 a_frags[NUM_TILES_M];
+        uint4 b_frags[NUM_TILES_N];
+
+        auto load_a_frags = [&] {
+#pragma unroll
+            for (int wm = 0; wm < NUM_TILES_M; wm++) {
+                const int row_offset = (wm * WY + wy) * MMA_M + lid % MMA_M;
+                const int col_offset = wk + lid / MMA_M * 8;
+                const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_A_2_S>(row_offset * BK + col_offset);
+                // if (bx == 0 && by == 0 && wid == 1 && i == 0 && wk == 0 && wm == 0) {
+                //     printf("[tid %d] ldmatrix A (%d, %d)\n", tid, offset / 8 / 8, offset / 8 % 8);
+                // }
+                ldmatrix(a_frags[wm], &s_A[stage][0][offset]);
+            }
+        };
+
+        auto load_b_frags = [&] {
+#pragma unroll
+            for (int wn = 0; wn < NUM_TILES_N; wn++) {
+                const int row_offset = wk + lid % MMA_K;
+                const int col_offset = (wn * WX + wx) * (2 * MMA_N) + lid / MMA_K * 8;
+                const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_B_2_S>(row_offset * BN + col_offset);
+                // if (bx == 0 && by == 0 && wid == 1 && i == 0 && wk == 0 && wn == 0) {
+                //     printf("[tid %d] ldmatrix B (%d, %d)\n", tid, offset / 8 / 8, offset / 8 % 8);
+                // }
+                ldmatrix_trans(b_frags[wn], &s_B[stage][0][offset]);
+            }
+        };
+
+        if (wid % 2 == 1) {
+            load_a_frags();
+            load_b_frags();
+        } else {
+            load_b_frags();
+            load_a_frags();
+        }
+
+#pragma unroll
+        for (int wm = 0; wm < NUM_TILES_M; wm++) {
+#pragma unroll
+            for (int wn = 0; wn < NUM_TILES_N; wn++) {
+                mma_m16n8k16(((uint2 *)&c_frags[wm][wn])[0], a_frags[wm], ((uint2 *)&b_frags[wn])[0],
+                             ((uint2 *)&c_frags[wm][wn])[0]);
+                mma_m16n8k16(((uint2 *)&c_frags[wm][wn])[1], a_frags[wm], ((uint2 *)&b_frags[wn])[1],
+                             ((uint2 *)&c_frags[wm][wn])[1]);
+            }
+        }
+    };
+
+    // ===== mma =====
+    // auto mma_compute = [&](int k) {
+    //     const int stage = k % STAGES;
+    // };
+
+#pragma unroll
+    for (int i = 0; i < STAGES - 1; i++) {
+        fetch_block(i);
+        cp_async_commit_group();
+    }
+
+    for (int k = STAGES - 1; k < K / BK; k++) {
+        cp_async_wait_group<STAGES - 2>();
+        __syncthreads();
+
+#pragma unroll
+        for (int wk = 0; wk < BK; wk += MMA_K) {
+            const int wki = wk / MMA_K;
+
+            constexpr int A_TILES_PER_WK = (BM / A_LOAD_TILE_Y) / (BK / MMA_K);
+#pragma unroll
+            for (int ak = wki * A_TILES_PER_WK; ak < (wki + 1) * A_TILES_PER_WK; ak++) {
+                fetch_A_tile(k, ak);
+            }
+
+            constexpr int B_TILES_PER_WK = (BK / B_LOAD_TILE_Y) / (BK / MMA_K);
+#pragma unroll
+            for (int bk = wki * B_TILES_PER_WK; bk < (wki + 1) * A_TILES_PER_WK; bk++) {
+                fetch_B_tile(k, bk);
+            }
+
+            mma_compute(k - (STAGES - 1), wk);
+        }
+        cp_async_commit_group();
+    }
+
+    cp_async_wait_group<0>();
+    __syncthreads();
+
+#pragma unroll
+    for (int i = -(STAGES - 1); i < 0; i++) {
+#pragma unroll
+        for (int wk = 0; wk < BK; wk += MMA_K) {
+            mma_compute(K / BK + i, wk);
+        }
+    }
+
+    // store sums to C
+    const int C_x = lid * 2 % MMA_N;
+    const int C_y = lid * 2 / MMA_N;
+
+    if constexpr (false) {
+        half *C_block = C + by * BM * N + bx * BN;
+#pragma unroll
+        for (int m = 0; m < NUM_TILES_M; m++) {
+#pragma unroll
+            for (int n = 0; n < NUM_TILES_N; n++) {
+                half *C_tile = C_block + (m * WY + wy) * MMA_M * N + (n * WX + wx) * (2 * MMA_N);
+                *(uint *)&C_tile[C_y * N + C_x] = c_frags[m][n].x;
+                *(uint *)&C_tile[C_y * N + C_x + 8] = c_frags[m][n].z;
+                *(uint *)&C_tile[(C_y + 8) * N + C_x] = c_frags[m][n].y;
+                *(uint *)&C_tile[(C_y + 8) * N + C_x + 8] = c_frags[m][n].w;
+            }
+        }
+    } else {
+        // store from register to shared memory
+        static_assert(STAGES * (BM + BN) * BK >= BM * BN, "unimplemented: not enough shared memory");
+
+        constexpr int SWIZZLE_C_2_S = ce_max(64, BN) / SWIZZLE_2_M;
+        auto swizzle_fn = swizzle_permute<SWIZZLE_2_M, SWIZZLE_C_2_S>;
+
+        __syncthreads();
+
+#pragma unroll
+        for (int m = 0; m < NUM_TILES_M; m++) {
+#pragma unroll
+            for (int n = 0; n < NUM_TILES_N; n++) {
+                const int st_y = (m * WY + wy) * MMA_M + C_y;
+                const int st_x = (n * WX + wx) * (2 * MMA_N) + C_x;
+                *(uint *)&shm[swizzle_fn(st_y * BN + st_x)] = c_frags[m][n].x;
+                *(uint *)&shm[swizzle_fn(st_y * BN + st_x + 8)] = c_frags[m][n].z;
+                *(uint *)&shm[swizzle_fn((st_y + 8) * BN + st_x)] = c_frags[m][n].y;
+                *(uint *)&shm[swizzle_fn((st_y + 8) * BN + st_x + 8)] = c_frags[m][n].w;
+            }
+        }
+        __syncthreads();
+
+        // shared memory -> global memory
+        half *C_block = C + by * BM * N + bx * BN;
+
+        constexpr int C_STORE_TILE_Y = NUM_THREADS * 8 / BN;
+        const int C_x = tid * 8 % BN;
+        const int C_y = tid * 8 / BN;
+
+#pragma unroll
+        for (int y_start = 0; y_start < BM; y_start += C_STORE_TILE_Y) {
+            const int y = y_start + C_y;
+            const int offset = swizzle_fn(y * BN + C_x);
+            *(float4 *)&C_block[y * N + C_x] = *(float4 *)&shm[offset];
+        }
+    }
+}
+
+template <int BM, int BN, int BK, int WX, int WY, int STAGES, int BLOCK_SWIZZLE_SIZE = 1, int MMA_M = 16, int MMA_N = 8,
+          int MMA_K = 16>
+void hgemm_mma_v3(const half *A, const half *B, half *C, int M, int N, int K) {
+    CHECK(M % BM == 0 && N % BN == 0 && K % BK == 0) << "unimplemented: invalid matrix dimensions";
+    dim3 grid_dim(N / BN, M / BM);
+    constexpr int block_dim = WX * WY * WARP_SIZE;
+    constexpr int shared_mem_size = STAGES * (BM + BN) * BK * sizeof(half);
+    CHECK_CUDA(
+        cudaFuncSetAttribute(hgemm_mma_v3_kernel<BM, BN, BK, WX, WY, STAGES, BLOCK_SWIZZLE_SIZE, MMA_M, MMA_N, MMA_K>,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size));
+    hgemm_mma_v3_kernel<BM, BN, BK, WX, WY, STAGES, BLOCK_SWIZZLE_SIZE, MMA_M, MMA_N, MMA_K>
+        <<<grid_dim, block_dim, shared_mem_size>>>(A, B, C, M, N, K);
+    CHECK_CUDA(cudaGetLastError());
+}
+
 void hgemm_cublas(cublasHandle_t handle, const half *A, const half *B, half *C, int M, int N, int K) {
     const half alpha = __float2half(1);
     const half beta = __float2half(0);
@@ -926,22 +1190,25 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
                                 int K) { hgemm_cublas(handle, A, B, C, M, N, K); }},
             // MAKE_ITEM(hgemm_v1),
 
-            MAKE_ITEM(hgemm_v2<16, 16, 16>),
-            // MAKE_ITEM(hgemm_v2<32, 8, 16>),
-            // MAKE_ITEM(hgemm_v2<8, 32, 16>),
+            // MAKE_ITEM(hgemm_v2<16, 16, 16>),
+            // // MAKE_ITEM(hgemm_v2<32, 8, 16>),
+            // // MAKE_ITEM(hgemm_v2<8, 32, 16>),
 
-            MAKE_ITEM(hgemm_v3<128, 128, 32, 2, 2>),
+            // MAKE_ITEM(hgemm_v3<128, 128, 32, 2, 2>),
 
-            MAKE_ITEM(hgemm_v4<128, 128, 32, 2, 2, 2>),
+            // MAKE_ITEM(hgemm_v4<128, 128, 32, 2, 2, 2>),
 
-            // MAKE_ITEM(hgemm_mma_v1<>),
+            // // MAKE_ITEM(hgemm_mma_v1<>),
 
             MAKE_ITEM(hgemm_mma_v2<128, 128, 32, 2, 2, 3, true, 2>),
+            // MAKE_ITEM(hgemm_mma_v2<256, 128, 64, 4, 2, 3, true, 2>),
+            // MAKE_ITEM(hgemm_mma_v2<256, 128, 64, 2, 4, 3, true, 2>),
+            // MAKE_ITEM(hgemm_mma_v2<128, 256, 64, 2, 4, 3, true, 2>),
 
-            // MAKE_ITEM(hgemm_mma_v2<256, 256, 32, 2, 2, 3, true>),
-            // MAKE_ITEM(hgemm_mma_v2<256, 256, 32, 2, 4, 3, true>),
-            // MAKE_ITEM(hgemm_mma_v2<256, 256, 32, 4, 2, 3, true>),
-            // MAKE_ITEM(hgemm_mma_v2<256, 256, 32, 4, 4, 3, true>),
+            MAKE_ITEM(hgemm_mma_v3<128, 128, 32, 2, 2, 2, 2>),
+            MAKE_ITEM(hgemm_mma_v3<128, 128, 32, 2, 2, 3, 2>),
+            MAKE_ITEM(hgemm_mma_v3<128, 128, 32, 2, 2, 4, 2>),
+            MAKE_ITEM(hgemm_mma_v3<128, 128, 32, 2, 2, 5, 2>),
 
             // MAKE_ITEM(hgemm),
         };
@@ -1021,25 +1288,99 @@ void save_result(const char *save_path, const std::vector<PerfRecord> &all_recor
     fclose(stream);
 }
 
+// Helper function to parse size specification
+std::vector<int> parse_sizes(const std::string &spec) {
+    std::vector<int> result;
+
+    // Check if it's a range format (contains two colons)
+    size_t colon1 = spec.find(':');
+    size_t colon2 = spec.find(':', colon1 + 1);
+
+    if (colon1 != std::string::npos && colon2 != std::string::npos) {
+        // Range format: start:stop:step
+        int start = std::stoi(spec.substr(0, colon1));
+        int stop = std::stoi(spec.substr(colon1 + 1, colon2 - colon1 - 1));
+        int step = std::stoi(spec.substr(colon2 + 1));
+
+        for (int i = start; i <= stop; i += step) {
+            result.emplace_back(i);
+        }
+    } else {
+        // Comma-separated format
+        std::stringstream ss(spec);
+        std::string item;
+
+        while (std::getline(ss, item, ',')) {
+            result.emplace_back(std::stoi(item));
+        }
+    }
+
+    return result;
+}
+
+struct Args {
+    int M = 8192;
+    int N = 8192;
+    int K = 8192;
+    std::vector<int> sizes;
+};
+
+Args parse_args(int argc, char **argv) {
+    Args args;
+
+    int opt;
+    while ((opt = getopt(argc, argv, "M:N:K:S:h")) != -1) {
+        switch (opt) {
+        case 'M':
+            args.M = atoi(optarg);
+            break;
+        case 'N':
+            args.N = atoi(optarg);
+            break;
+        case 'K':
+            args.K = atoi(optarg);
+            break;
+        case 'S':
+            args.sizes = parse_sizes(optarg);
+            break;
+        case 'h':
+            printf("Usage: %s [-M size] [-N size] [-K size] [-S sizes]\n", argv[0]);
+            printf("Options:\n");
+            printf("  -M size    Set M dimension (default: %d)\n", 8192);
+            printf("  -N size    Set N dimension (default: %d)\n", 8192);
+            printf("  -K size    Set K dimension (default: %d)\n", 8192);
+            printf("  -S sizes   Set square matrix sizes. Format:\n");
+            printf("             start:stop:step (e.g., 1024:8192:1024)\n");
+            printf("             or comma-separated (e.g., 1024,2048,4096)\n");
+            printf("  -h         Show this help message\n");
+            exit(EXIT_SUCCESS);
+        default:
+            fprintf(stderr, "Usage: %s [-M size] [-N size] [-K size] [-S sizes]\n", argv[0]);
+            exit(EXIT_FAILURE);
+        }
+    }
+    return args;
+}
+
 int main(int argc, char **argv) {
+    Args args = parse_args(argc, argv);
 
 #ifdef HGEMM_DEBUG
     perf(16, 8, 16);
     return 0;
 #endif
 
-    // square matrix
-    {
-        std::vector<PerfRecord> all_records;
-        // const int dims[]{1024, 2048, 3072, 4096, 6144, 8192};
-        const int dims[] = {8192};
-        for (int d : dims) {
-            auto records = perf(d, d, d);
-            all_records.insert(all_records.end(), records.begin(), records.end());
-        }
-
-        save_result("output/hgemm_bench_square.csv", all_records);
+    if (args.sizes.empty()) {
+        perf(args.M, args.N, args.K);
+        return 0;
     }
+
+    std::vector<PerfRecord> all_records;
+    for (int size : args.sizes) {
+        auto records = perf(size, size, size);
+        all_records.insert(all_records.end(), records.begin(), records.end());
+    }
+    save_result("output/hgemm_bench_square.csv", all_records);
 
     // fixed K to avoid split-K kernels
     // {
