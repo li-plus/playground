@@ -1070,9 +1070,9 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
 
     __syncthreads();
 
-    // STSM
 #pragma unroll
     for (int m = 0; m < NUM_MMA_M; m++) {
+        // STSM
 #pragma unroll
         for (int n = 0; n < NUM_MMA_N; n++) {
             const int stsm_y = (m * WY + wy) * MMA_M + C_stsm_y;
@@ -1082,21 +1082,22 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
             *(uint *)&smem[swizzle_fn((stsm_y + 8) * BN + stsm_x)] = c_frags[m][n].y;
             *(uint *)&smem[swizzle_fn((stsm_y + 8) * BN + stsm_x + 8)] = c_frags[m][n].w;
         }
-    }
-    __syncthreads();
 
-    // STG
-    half *C_block = C + by * BM * N + bx * BN;
+        __syncthreads();
 
-    constexpr int C_STORE_TILE_Y = NUM_THREADS * 8 / BN;
-    const int C_stg_x = tid * 8 % BN;
-    const int C_stg_y = tid * 8 / BN;
+        // STG
+        half *C_block = C + by * BM * N + bx * BN;
+
+        constexpr int C_STORE_TILE_Y = NUM_THREADS * 8 / BN;
+        const int C_stg_x = tid * 8 % BN;
+        const int C_stg_y = tid * 8 / BN;
 
 #pragma unroll
-    for (int y_start = 0; y_start < BM; y_start += C_STORE_TILE_Y) {
-        const int stg_y = y_start + C_stg_y;
-        const int offset = swizzle_fn(stg_y * BN + C_stg_x);
-        *(float4 *)&C_block[stg_y * N + C_stg_x] = *(float4 *)&smem[offset];
+        for (int tile_i = m * NUM_MMA_N; tile_i < (m + 1) * NUM_MMA_N; tile_i++) {
+            const int stg_y = tile_i * C_STORE_TILE_Y + C_stg_y;
+            const int offset = swizzle_fn(stg_y * BN + C_stg_x);
+            *(float4 *)&C_block[stg_y * N + C_stg_x] = *(float4 *)&smem[offset];
+        }
     }
 }
 
