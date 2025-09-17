@@ -922,97 +922,85 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
     static_assert((BM * BK) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of A");
     static_assert(BK <= NUM_THREADS * 8, "unimplemented: BK is too large");
     constexpr int A_LOAD_TILE_Y = NUM_THREADS * 8 / BK;
+    constexpr int A_NUM_LDGSTS = BM / A_LOAD_TILE_Y;
     const int A_x = tid * 8 % BK;
     const int A_y = tid * 8 / BK;
 
     static_assert((BK * BN) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of B");
     static_assert(BN <= NUM_THREADS * 8, "unimplemented: BN is too large");
     constexpr int B_LOAD_TILE_Y = NUM_THREADS * 8 / BN;
+    constexpr int B_NUM_LDGSTS = BK / B_LOAD_TILE_Y;
     const int B_x = tid * 8 % BN;
     const int B_y = tid * 8 / BN;
 
-    auto fetch_A_tile = [&](int k, int tile_i) {
+    auto fetch_A_block = [&](int k) {
         const int stage = k % STAGES;
         const half *A_block = A + by * BM * K + k * BK;
-        const int y = tile_i * A_LOAD_TILE_Y + A_y;
-        const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_A_2_S>(y * BK + A_x);
-        cp_async_cg((float4 *)&s_A[stage][0][offset], (float4 *)&A_block[y * K + A_x]);
+#pragma unroll
+        for (int tile_i = 0; tile_i < A_NUM_LDGSTS; tile_i++) {
+            const int y = tile_i * A_LOAD_TILE_Y + A_y;
+            const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_A_2_S>(y * BK + A_x);
+            cp_async_cg((float4 *)&s_A[stage][0][offset], (float4 *)&A_block[y * K + A_x]);
+        }
     };
-
-    auto fetch_B_tile = [&](int k, int tile_i) {
+    auto fetch_B_block = [&](int k) {
         const int stage = k % STAGES;
         const half *B_block = B + bx * BN + k * BK * N;
-        const int y = tile_i * B_LOAD_TILE_Y + B_y;
-        const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_B_2_S>(y * BN + B_x);
-        cp_async_cg((float4 *)&s_B[stage][0][offset], (float4 *)&B_block[y * N + B_x]);
+#pragma unroll
+        for (int tile_i = 0; tile_i < B_NUM_LDGSTS; tile_i++) {
+            const int y = tile_i * B_LOAD_TILE_Y + B_y;
+            const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_B_2_S>(y * BN + B_x);
+            cp_async_cg((float4 *)&s_B[stage][0][offset], (float4 *)&B_block[y * N + B_x]);
+        }
     };
-
-    // ===== ldmatrix =====
-    constexpr int NUM_MMA = NUM_MMA_K * NUM_MMA_M * NUM_MMA_N;
-    constexpr int NUM_LDGSTS_A = BM / A_LOAD_TILE_Y;
-    constexpr int NUM_LDGSTS_B = BK / B_LOAD_TILE_Y;
-    constexpr int NUM_LDGSTS = NUM_LDGSTS_A + NUM_LDGSTS_B;
-    static_assert(NUM_MMA % NUM_LDGSTS == 0, "unimplemented: not enough computation to hide latency");
-    constexpr int NUM_MMA_PER_LDGSTS = NUM_MMA / NUM_LDGSTS;
-
-    constexpr int NUM_LDSM = NUM_MMA_M + NUM_MMA_N;
-    static_assert(NUM_MMA % NUM_LDSM == 0, "unimplemented: not enough computation to hide latency");
-    constexpr int NUM_MMA_PER_LDSM = NUM_MMA / NUM_LDSM;
 
     uint4 a_frags[2][NUM_MMA_M];
     uint4 b_frags[2][NUM_MMA_N];
 
-    auto load_a_frag = [&](int k, int mma_k, int mma_m) {
-        const int stage = k % STAGES;
-        const int stage_ldsm = mma_k % 2;
-        const int row_offset = (mma_m * WY + wy) * MMA_M + lid % MMA_M;
-        const int col_offset = mma_k * MMA_K + lid / MMA_M * 8;
-        const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_A_2_S>(row_offset * BK + col_offset);
-        ldmatrix(a_frags[stage_ldsm][mma_m], &s_A[stage][0][offset]);
-    };
-
     auto load_a_frags = [&](int k, int mma_k) {
-#pragma unroll
-        for (int m = 0; m < NUM_MMA_M; m++) {
-            load_a_frag(k, mma_k, m);
-        }
-    };
-
-    auto load_b_frag = [&](int k, int mma_k, int mma_n) {
         const int stage = k % STAGES;
         const int stage_ldsm = mma_k % 2;
-        const int row_offset = mma_k * MMA_K + lid % MMA_K;
-        const int col_offset = (mma_n * WX + wx) * (2 * MMA_N) + lid / MMA_K * 8;
-        const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_B_2_S>(row_offset * BN + col_offset);
-        ldmatrix_trans(b_frags[stage_ldsm][mma_n], &s_B[stage][0][offset]);
+        const int col_offset = mma_k * MMA_K + lid / MMA_M * 8;
+#pragma unroll
+        for (int mma_m = 0; mma_m < NUM_MMA_M; mma_m++) {
+            const int row_offset = (mma_m * WY + wy) * MMA_M + lid % MMA_M;
+            const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_A_2_S>(row_offset * BK + col_offset);
+            ldmatrix(a_frags[stage_ldsm][mma_m], &s_A[stage][0][offset]);
+        }
     };
 
     auto load_b_frags = [&](int k, int mma_k) {
+        const int stage = k % STAGES;
+        const int stage_ldsm = mma_k % 2;
+        const int row_offset = mma_k * MMA_K + lid % MMA_K;
 #pragma unroll
         for (int mma_n = 0; mma_n < NUM_MMA_N; mma_n++) {
-            load_b_frag(k, mma_k, mma_n);
+            const int col_offset = (mma_n * WX + wx) * (2 * MMA_N) + lid / MMA_K * 8;
+            const int offset = swizzle_permute<SWIZZLE_2_M, SWIZZLE_B_2_S>(row_offset * BN + col_offset);
+            ldmatrix_trans(b_frags[stage_ldsm][mma_n], &s_B[stage][0][offset]);
         }
     };
 
-    auto mma_frag = [&](int mma_k, int mma_m, int mma_n) {
+    auto mma_frags = [&](int mma_k) {
         const int stage_ldsm = mma_k % 2;
-        mma_m16n8k16(((uint2 *)&c_frags[mma_m][mma_n])[0], a_frags[stage_ldsm][mma_m],
-                     ((uint2 *)&b_frags[stage_ldsm][mma_n])[0], ((uint2 *)&c_frags[mma_m][mma_n])[0]);
-        mma_m16n8k16(((uint2 *)&c_frags[mma_m][mma_n])[1], a_frags[stage_ldsm][mma_m],
-                     ((uint2 *)&b_frags[stage_ldsm][mma_n])[1], ((uint2 *)&c_frags[mma_m][mma_n])[1]);
+
+#pragma unroll
+        for (int mma_m = 0; mma_m < NUM_MMA_M; mma_m++) {
+#pragma unroll
+            for (int mma_n = 0; mma_n < NUM_MMA_N; mma_n++) {
+                mma_m16n8k16(((uint2 *)&c_frags[mma_m][mma_n])[0], a_frags[stage_ldsm][mma_m],
+                             ((uint2 *)&b_frags[stage_ldsm][mma_n])[0], ((uint2 *)&c_frags[mma_m][mma_n])[0]);
+                mma_m16n8k16(((uint2 *)&c_frags[mma_m][mma_n])[1], a_frags[stage_ldsm][mma_m],
+                             ((uint2 *)&b_frags[stage_ldsm][mma_n])[1], ((uint2 *)&c_frags[mma_m][mma_n])[1]);
+            }
+        }
     };
 
 #pragma unroll
     for (int k = 0; k < STAGES - 1; k++) {
         // LDGSTS
-#pragma unroll
-        for (int tile_i = 0; tile_i < NUM_LDGSTS_A; tile_i++) {
-            fetch_A_tile(k, tile_i);
-        }
-#pragma unroll
-        for (int tile_i = 0; tile_i < BK / B_LOAD_TILE_Y; tile_i++) {
-            fetch_B_tile(k, tile_i);
-        }
+        fetch_A_block(k);
+        fetch_B_block(k);
         cp_async_commit_group();
     }
 
@@ -1020,37 +1008,23 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
     __syncthreads();
 
     // LDSM
-#pragma unroll
-    for (int mma_m = 0; mma_m < NUM_MMA_M; mma_m++) {
-        load_a_frag(0, 0, mma_m);
-    }
-#pragma unroll
-    for (int mma_n = 0; mma_n < NUM_MMA_N; mma_n++) {
-        load_b_frag(0, 0, mma_n);
-    }
+    load_a_frags(0, 0);
+    load_b_frags(0, 0);
 
     // main loop over k
     for (int k = STAGES - 1; k < K / BK; k++) {
 
+        // LDGSTS
+        fetch_A_block(k);
+        fetch_B_block(k);
+        cp_async_commit_group();
+
 #pragma unroll
         for (int mma_k = 0; mma_k < NUM_MMA_K; mma_k++) {
-            // LDGSTS
-            constexpr int A_TILES_PER_MMA_K = NUM_LDGSTS_A / NUM_MMA_K;
-            constexpr int B_TILES_PER_MMA_K = NUM_LDGSTS_B / NUM_MMA_K;
-#pragma unroll
-            for (int tile_i = mma_k * A_TILES_PER_MMA_K; tile_i < (mma_k + 1) * A_TILES_PER_MMA_K; tile_i++) {
-                fetch_A_tile(k, tile_i);
-            }
-#pragma unroll
-            for (int tile_i = mma_k * B_TILES_PER_MMA_K; tile_i < (mma_k + 1) * B_TILES_PER_MMA_K; tile_i++) {
-                fetch_B_tile(k, tile_i);
-            }
-
             // LDSM
             const int ldsm_mma_k = (mma_k + 1) % NUM_MMA_K;
             const int ldsm_k = k - (STAGES - 1) + (mma_k + 1) / NUM_MMA_K;
             if (mma_k + 1 == NUM_MMA_K) {
-                cp_async_commit_group();
                 cp_async_wait_group<STAGES - 2>();
                 __syncthreads();
             }
@@ -1058,53 +1032,7 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
             load_b_frags(ldsm_k, ldsm_mma_k);
 
             // MMA
-#pragma unroll
-            for (int mma_m = 0; mma_m < NUM_MMA_M; mma_m++) {
-#pragma unroll
-                for (int mma_n = 0; mma_n < NUM_MMA_N; mma_n++) {
-                    // prefetch global -> shared
-                    // const int mma_idx = mma_k * NUM_MMA_M * NUM_MMA_N + mma_m * NUM_MMA_N + mma_n;
-                    // if (mma_idx % NUM_MMA_PER_LDGSTS == 0) {
-                    //     const int ldgsts_idx = mma_idx / NUM_MMA_PER_LDGSTS;
-                    //     if (ldgsts_idx < NUM_LDGSTS_A) {
-                    //         fetch_A_tile(k, ldgsts_idx);
-                    //     } else {
-                    //         fetch_B_tile(k, ldgsts_idx - NUM_LDGSTS_A);
-                    //     }
-                    // }
-
-                    // prefetch shared -> register
-                    // const int ldsm_mma_idx = mma_m * NUM_MMA_N + mma_n;
-                    // if (mma_k + 1 == NUM_MMA_K && ldsm_mma_idx == 0) {
-                    //     cp_async_commit_group();
-
-                    //     cp_async_wait_group<STAGES - 2>();
-                    //     __syncthreads();
-                    // }
-                    // if (ldsm_mma_idx % NUM_MMA_PER_LDSM == 0) {
-                    //     const int ldsm_idx = ldsm_mma_idx / NUM_MMA_PER_LDSM;
-
-                    //     int ldsm_k = k;
-                    //     int ldsm_mma_k = (mma_k + 1) % NUM_MMA_K;
-                    //     if (mma_k + 1 == NUM_MMA_K && ldsm_mma_idx == 0) {
-                    //         cp_async_commit_group();
-
-                    //         cp_async_wait_group<STAGES - 2>();
-                    //         __syncthreads();
-
-                    //         ldsm_k = k + 1;
-                    //     }
-
-                    //     if (ldsm_idx < NUM_MMA_M) {
-                    //         load_a_frag(ldsm_k, ldsm_mma_k, ldsm_idx);
-                    //     } else {
-                    //         load_b_frag(ldsm_k, ldsm_mma_k, ldsm_idx - NUM_MMA_M);
-                    //     }
-                    // }
-
-                    mma_frag(mma_k, mma_m, mma_n);
-                }
-            }
+            mma_frags(mma_k);
         }
     }
 
@@ -1126,13 +1054,7 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
             }
 
             // MMA
-#pragma unroll
-            for (int mma_m = 0; mma_m < NUM_MMA_M; mma_m++) {
-#pragma unroll
-                for (int mma_n = 0; mma_n < NUM_MMA_N; mma_n++) {
-                    mma_frag(mma_k, mma_m, mma_n);
-                }
-            }
+            mma_frags(mma_k);
         }
     }
 
@@ -1219,9 +1141,10 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
     CHECK_CUDA(cudaMallocHost(&A, sizeof(half) * M * K));
     CHECK_CUDA(cudaMallocHost(&B, sizeof(half) * K * N));
 
+    const float rsqrt_K = 1.f / std::sqrt(K);
     for (int i = 0; i < M * K; i++) {
 #ifndef HGEMM_DEBUG
-        A[i] = __float2half((uniform() * 2 - 1) / std::sqrt(K));
+        A[i] = __float2half((uniform() * 2 - 1) * rsqrt_K);
 #else
         A[i] = __float2half(i / 100.f);
 #endif
@@ -1229,7 +1152,7 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
 
     for (int i = 0; i < K * N; i++) {
 #ifndef HGEMM_DEBUG
-        B[i] = __float2half((uniform() * 2 - 1) / std::sqrt(K));
+        B[i] = __float2half((uniform() * 2 - 1) * rsqrt_K);
 #else
         B[i] = __float2half(i / 100.f);
 #endif
@@ -1262,12 +1185,10 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
 
             // MAKE_ITEM(hgemm_mma_v2<128, 128, 32, 2, 2, 3, true, 2>),
 
-            // MAKE_ITEM(hgemm_mma_v3<128, 128, 32, 2, 2, 3, 2>),
-            MAKE_ITEM(hgemm_mma_v3<128, 128, 32, 2, 2, 4, 2>),
-            // MAKE_ITEM(hgemm_mma_v3<128, 128, 32, 2, 2, 5, 2>),
-            // MAKE_ITEM(hgemm_mma_v3<128, 128, 32, 2, 2, 3, 2, true>),
-            MAKE_ITEM(hgemm_mma_v3<128, 128, 32, 2, 2, 4, 2, true>),
-            // MAKE_ITEM(hgemm_mma_v3<128, 128, 32, 2, 2, 5, 2, true>),
+            MAKE_ITEM(hgemm_mma_v3<128, 128, 32, 2, 2, 4, 8>),
+            MAKE_ITEM(hgemm_mma_v3<256, 128, 32, 4, 2, 4, 4>),
+            MAKE_ITEM(hgemm_mma_v3<256, 128, 32, 4, 2, 4, 8>),
+            MAKE_ITEM(hgemm_mma_v3<128, 256, 32, 2, 4, 4, 8>),
 
             // MAKE_ITEM(hgemm),
         };
@@ -1296,9 +1217,7 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
         check_is_close_d(dC_ref, dC_opt, M * N, 1e-3f);
 
         auto perf_fn = [=] { fn(dA, dB, dC_opt, M, N, K); };
-        const int warmup = std::max(4096 / M, 2);
-        const int active = warmup * 5;
-        const float elapsed = timeit(perf_fn, warmup, active);
+        const float elapsed = timeit(perf_fn, 2, 10);
 
         const double tflops = (2ull * M * N * K) * 1e-12 / elapsed;
         const float bandwidth = (M * K + K * N + M * N) * sizeof(half) * 1e-9f / elapsed;
