@@ -17,6 +17,7 @@
 #include "common.h"
 #include <cstdlib>
 #include <cuda_fp16.h>
+#include <curand_kernel.h>
 #include <functional>
 #include <getopt.h>
 #include <mma.h>
@@ -1136,34 +1137,109 @@ struct PerfRecord {
         : M(M), N(N), K(K), name(std::move(name)), elapsed(elapsed), tflops(tflops) {}
 };
 
+__global__ void uniform_kernel(half *buffer, int N, float start, float end) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    curandState state;
+    curand_init(42, idx, 0, &state);
+    const half2 weight = __float2half2_rn(end - start);
+    const half2 bias = __float2half2_rn(start);
+
+    for (int i = 8 * idx; i < N; i += 8 * blockDim.x * gridDim.x) {
+        half2 x[4];
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            x[j] = __float22half2_rn({curand_uniform(&state), curand_uniform(&state)});
+            x[j] = __hfma2(x[j], weight, bias);
+        }
+        *(float4 *)&buffer[i] = *(float4 *)x;
+    }
+}
+
+void uniform_cuda(half *buffer, int N, float start, float end) {
+    CHECK(N % 8 == 0) << "N must be multiple of 8";
+    constexpr int block_size = 64;
+    const int grid_size = std::min(32768, ceil_div(N / 8, block_size));
+    uniform_kernel<<<grid_size, block_size>>>(buffer, N, start, end);
+    CHECK_CUDA(cudaGetLastError());
+}
+
+__global__ void is_close_kernel(const half *A, const half *B, int N, float atol, float rtol, bool *failure) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    for (int i = idx * 8; i < N; i += blockDim.x * gridDim.x * 8) {
+        half2 ah[4], bh[4];
+        *(float4 *)ah = *(float4 *)&A[i];
+        *(float4 *)bh = *(float4 *)&B[i];
+
+        float af[8], bf[8];
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            ((float2 *)af)[j] = __half22float2(ah[j]);
+            ((float2 *)bf)[j] = __half22float2(bh[j]);
+        }
+
+#pragma unroll
+        for (int j = 0; j < 8; j++) {
+            const float a = af[j];
+            const float b = bf[j];
+            const float diff = fabs(a - b);
+            const float tol = atol + rtol * fabs(b);
+            if (diff > tol) {
+                *failure = true;
+                // printf("[idx %d] a=%f b=%f diff=%f tol=%f\n", i, a, b, diff, tol);
+                // asm("trap;");
+            }
+        }
+    }
+}
+
+bool is_close_cuda(const half *A, const half *B, int N, float atol, float rtol) {
+    CHECK(N % 8 == 0) << "N must be multiple of 8";
+
+    bool *d_failure;
+    CHECK_CUDA(cudaMalloc(&d_failure, sizeof(bool)));
+    CHECK_CUDA(cudaMemset(d_failure, 0, sizeof(bool)));
+
+    constexpr int block_size = 256;
+    const int grid_size = std::min(32768, ceil_div(N / 8, block_size));
+    is_close_kernel<<<grid_size, block_size>>>(A, B, N, atol, rtol, d_failure);
+    CHECK_CUDA(cudaGetLastError());
+
+    bool h_failure;
+    CHECK_CUDA(cudaMemcpy(&h_failure, d_failure, sizeof(bool), cudaMemcpyDeviceToHost));
+
+    CHECK_CUDA(cudaFree(d_failure));
+
+    return !h_failure;
+}
+
 std::vector<PerfRecord> perf(int M, int N, int K) {
-    // make data
+    half *dA, *dB;
+    CHECK_CUDA(cudaMalloc(&dA, M * K * sizeof(half)));
+    CHECK_CUDA(cudaMalloc(&dB, K * N * sizeof(half)));
+
+#ifndef HGEMM_DEBUG
+    const float rsqrt_K = 1.f / std::sqrt(K);
+    uniform_cuda(dA, M * K, -rsqrt_K, rsqrt_K);
+    uniform_cuda(dB, K * N, -rsqrt_K, rsqrt_K);
+#else
     half *A, *B;
     CHECK_CUDA(cudaMallocHost(&A, sizeof(half) * M * K));
     CHECK_CUDA(cudaMallocHost(&B, sizeof(half) * K * N));
 
-    const float rsqrt_K = 1.f / std::sqrt(K);
     for (int i = 0; i < M * K; i++) {
-#ifndef HGEMM_DEBUG
-        A[i] = __float2half((uniform() * 2 - 1) * rsqrt_K);
-#else
         A[i] = __float2half(i / 100.f);
-#endif
     }
 
     for (int i = 0; i < K * N; i++) {
-#ifndef HGEMM_DEBUG
-        B[i] = __float2half((uniform() * 2 - 1) * rsqrt_K);
-#else
         B[i] = __float2half(i / 100.f);
-#endif
     }
 
-    half *dA, *dB;
-    CHECK_CUDA(cudaMalloc(&dA, M * K * sizeof(half)));
-    CHECK_CUDA(cudaMalloc(&dB, K * N * sizeof(half)));
     CHECK_CUDA(cudaMemcpy(dA, A, M * K * sizeof(half), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(dB, B, K * N * sizeof(half), cudaMemcpyHostToDevice));
+
+    CHECK_CUDA(cudaFreeHost(A));
+    CHECK_CUDA(cudaFreeHost(B));
+#endif
 
     cublasHandle_t handle;
     CHECK_CUBLAS(cublasCreate(&handle));
@@ -1215,7 +1291,10 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
 
         fn(dA, dB, dC_opt, M, N, K);
 
-        check_is_close_d(dC_ref, dC_opt, M * N, 1e-3f);
+        if (!is_close_cuda(dC_ref, dC_opt, M * N, 1e-3f, 1e-2f)) {
+            // TODO: use gpu
+            check_is_close_d(dC_ref, dC_opt, M * N, 1e-3f);
+        }
 
         auto perf_fn = [=] { fn(dA, dB, dC_opt, M, N, K); };
         const float elapsed = timeit(perf_fn, 2, 10);
@@ -1240,14 +1319,10 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
     PerfRecord best_record = *std::min_element(
         records.begin(), records.end(), [](const PerfRecord &a, const PerfRecord &b) { return a.elapsed < b.elapsed; });
 
-    printf("[best] %s vs cublas: %.1f%% (%.3f vs %.3f ms)\n", best_record.name.c_str(),
-           cublas_record.elapsed / best_record.elapsed * 100.f, best_record.elapsed * 1e3f,
-           cublas_record.elapsed * 1e3f);
+    printf("[best] %s vs cublas: %.1f%% (%.1f vs %.1f TFLOPS)\n", best_record.name.c_str(),
+           cublas_record.elapsed / best_record.elapsed * 100.f, best_record.tflops, cublas_record.tflops);
 
     CHECK_CUBLAS(cublasDestroy(handle));
-
-    CHECK_CUDA(cudaFreeHost(A));
-    CHECK_CUDA(cudaFreeHost(B));
 
     CHECK_CUDA(cudaFree(dA));
     CHECK_CUDA(cudaFree(dB));
