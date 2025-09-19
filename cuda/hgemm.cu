@@ -23,6 +23,8 @@
 #include <mma.h>
 #include <sstream>
 #include <string>
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
 
 // #define HGEMM_DEBUG
 
@@ -1195,21 +1197,16 @@ __global__ void is_close_kernel(const half *A, const half *B, int N, float atol,
 bool is_close_cuda(const half *A, const half *B, int N, float atol, float rtol) {
     CHECK(N % 8 == 0) << "N must be multiple of 8";
 
-    bool *d_failure;
-    CHECK_CUDA(cudaMalloc(&d_failure, sizeof(bool)));
-    CHECK_CUDA(cudaMemset(d_failure, 0, sizeof(bool)));
+    thrust::device_vector<bool> d_failure(1, false);
 
     constexpr int block_size = 256;
     const int grid_size = std::min(32768, ceil_div(N / 8, block_size));
-    is_close_kernel<<<grid_size, block_size>>>(A, B, N, atol, rtol, d_failure);
+    is_close_kernel<<<grid_size, block_size>>>(A, B, N, atol, rtol, d_failure.data().get());
     CHECK_CUDA(cudaGetLastError());
 
-    bool h_failure;
-    CHECK_CUDA(cudaMemcpy(&h_failure, d_failure, sizeof(bool), cudaMemcpyDeviceToHost));
+    thrust::host_vector<bool> h_failure = d_failure;
 
-    CHECK_CUDA(cudaFree(d_failure));
-
-    return !h_failure;
+    return !h_failure.front();
 }
 
 struct KernelRecord {
@@ -1218,32 +1215,27 @@ struct KernelRecord {
 };
 
 std::vector<PerfRecord> perf(int M, int N, int K, const std::string &kernel_name) {
-    half *dA, *dB;
-    CHECK_CUDA(cudaMalloc(&dA, M * K * sizeof(half)));
-    CHECK_CUDA(cudaMalloc(&dB, K * N * sizeof(half)));
+    thrust::device_vector<half> dA(M * K), dB(K * N);
 
 #ifndef HGEMM_DEBUG
     const float rsqrt_K = 1.f / std::sqrt(K);
-    uniform_cuda(dA, M * K, -rsqrt_K, rsqrt_K);
-    uniform_cuda(dB, K * N, -rsqrt_K, rsqrt_K);
+    uniform_cuda(dA.data().get(), M * K, -rsqrt_K, rsqrt_K);
+    uniform_cuda(dB.data().get(), K * N, -rsqrt_K, rsqrt_K);
 #else
-    half *A, *B;
-    CHECK_CUDA(cudaMallocHost(&A, sizeof(half) * M * K));
-    CHECK_CUDA(cudaMallocHost(&B, sizeof(half) * K * N));
+    {
+        thrust::host_vector<half> hA(M * K), hB(K * N);
 
-    for (int i = 0; i < M * K; i++) {
-        A[i] = __float2half(i / 100.f);
+        for (int i = 0; i < M * K; i++) {
+            hA[i] = __float2half(i / 100.f);
+        }
+
+        for (int i = 0; i < K * N; i++) {
+            hB[i] = __float2half(i / 100.f);
+        }
+
+        dA = hA;
+        dB = hB;
     }
-
-    for (int i = 0; i < K * N; i++) {
-        B[i] = __float2half(i / 100.f);
-    }
-
-    CHECK_CUDA(cudaMemcpy(dA, A, M * K * sizeof(half), cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(dB, B, K * N * sizeof(half), cudaMemcpyHostToDevice));
-
-    CHECK_CUDA(cudaFreeHost(A));
-    CHECK_CUDA(cudaFreeHost(B));
 #endif
 
     cublasHandle_t handle;
@@ -1269,7 +1261,7 @@ std::vector<PerfRecord> perf(int M, int N, int K, const std::string &kernel_name
         MAKE_KERNEL(hgemm_mma_v3<256, 128, 32, 4, 2, 4, 8>),
         MAKE_KERNEL(hgemm_mma_v3<128, 256, 32, 2, 4, 4, 8>),
 
-        MAKE_KERNEL(hgemm),
+        {"hgemm_llm", hgemm},
     };
 
 #undef MAKE_KERNEL
@@ -1286,24 +1278,21 @@ std::vector<PerfRecord> perf(int M, int N, int K, const std::string &kernel_name
 
     std::vector<PerfRecord> records;
 
-    half *dC_ref;
-    CHECK_CUDA(cudaMalloc(&dC_ref, M * N * sizeof(half)));
+    thrust::device_vector<half> dC_ref(M * N);
 
-    hgemm_cublas(handle, dA, dB, dC_ref, M, N, K);
+    hgemm_cublas(handle, dA.data().get(), dB.data().get(), dC_ref.data().get(), M, N, K);
 
     for (const auto &kernel : kernels) {
-        half *dC_opt;
-        CHECK_CUDA(cudaMalloc(&dC_opt, M * N * sizeof(half)));
-        CHECK_CUDA(cudaMemset(dC_opt, 0, M * N * sizeof(half)));
+        thrust::device_vector<half> dC_opt(M * N, __float2half(0));
 
-        kernel.fn(dA, dB, dC_opt, M, N, K);
+        kernel.fn(dA.data().get(), dB.data().get(), dC_opt.data().get(), M, N, K);
 
-        if (!is_close_cuda(dC_ref, dC_opt, M * N, 1e-3f, 1e-2f)) {
+        if (!is_close_cuda(dC_ref.data().get(), dC_opt.data().get(), M * N, 1e-3f, 1e-2f)) {
             // TODO: use gpu
-            check_is_close_d(dC_ref, dC_opt, M * N, 1e-3f);
+            check_is_close_d(dC_ref.data().get(), dC_opt.data().get(), M * N, 1e-3f);
         }
 
-        auto perf_fn = [=] { kernel.fn(dA, dB, dC_opt, M, N, K); };
+        auto perf_fn = [&] { kernel.fn(dA.data().get(), dB.data().get(), dC_opt.data().get(), M, N, K); };
         const float elapsed = timeit(perf_fn, 2, 20);
 
         const double tflops = (2ull * M * N * K) * 1e-12 / elapsed;
@@ -1312,8 +1301,6 @@ std::vector<PerfRecord> perf(int M, int N, int K, const std::string &kernel_name
         printf("[%s] elapsed %.3f us, %.1f TFLOPS, %.3f GB/s\n", kernel.name.c_str(), elapsed * 1e6, tflops, bandwidth);
 
         records.emplace_back(PerfRecord(M, N, K, kernel.name, elapsed, tflops));
-
-        CHECK_CUDA(cudaFree(dC_opt));
     }
 
     auto cublas_record_it =
@@ -1330,10 +1317,6 @@ std::vector<PerfRecord> perf(int M, int N, int K, const std::string &kernel_name
            cublas_record.elapsed / best_record.elapsed * 100.f, best_record.tflops, cublas_record.tflops);
 
     CHECK_CUBLAS(cublasDestroy(handle));
-
-    CHECK_CUDA(cudaFree(dA));
-    CHECK_CUDA(cudaFree(dB));
-    CHECK_CUDA(cudaFree(dC_ref));
 
     records.emplace_back(std::move(cublas_record));
     return records;
@@ -1432,7 +1415,7 @@ int main(int argc, char **argv) {
     Args args = parse_args(argc, argv);
 
 #ifdef HGEMM_DEBUG
-    perf(16, 8, 16);
+    perf(16, 8, 16, "mma_v1");
     return 0;
 #endif
 
