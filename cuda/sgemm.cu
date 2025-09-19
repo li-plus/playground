@@ -74,7 +74,7 @@ void sgemm_v2(const float *A, const float *B, float *C, int M, int N, int K) {
     CHECK_CUDA(cudaGetLastError());
 }
 
-template <int BM, int BN, int BK, int TM, int TN>
+template <int BM, int BN, int BK, int TM, int TN, int STAGES>
 __global__ void __launch_bounds__((BM / TM) * (BN / TN))
     sgemm_v3_kernel(const float *__restrict__ A, const float *__restrict__ B, float *__restrict__ C, int M, int N,
                     int K) {
@@ -143,6 +143,8 @@ each sub-tiles, one thread only handles 16 bytes at a time.
            Block A                 Block C
     */
 
+    static_assert(TN % 4 == 0, "unimplemented: TN is not multiple of 4");
+
     constexpr int BX = BN / TN; // blockDim.x
     constexpr int BY = BM / TM; // blockDim.y
     constexpr int NUM_THREADS = BY * BX;
@@ -153,12 +155,10 @@ each sub-tiles, one thread only handles 16 bytes at a time.
     const int ty = threadIdx.y;
     const int tid = ty * BX + tx;
 
-    __shared__ float s_A[BM][BK];
-    __shared__ float s_B[BK][BN];
+    extern __shared__ float smem[];
 
-    const float *A_block = A + by * BM * K;
-    const float *B_block = B + bx * BN;
-    float *C_block = C + by * BM * N + bx * BN;
+    auto s_A = (float(*)[BM][BK]) & smem[0];                // [STAGES][BM][BK]
+    auto s_B = (float(*)[BK][BN]) & smem[STAGES * BM * BK]; // [STAGES][BK][BN]
 
     float sums[TM][TN]{};
 
@@ -177,27 +177,87 @@ each sub-tiles, one thread only handles 16 bytes at a time.
     const int B_x = tid * 4 % BN;
     const int B_y = tid * 4 / BN;
 
-    for (int k = 0; k < K; k += BK) {
-        pipeline.producer_acquire();
+    auto fetch_A_block = [&](int k) {
+        const int stage = k % STAGES;
+        const float *A_block = A + by * BM * K + k * BK;
 
         // load BM * BK tile of A into shared memory
 #pragma unroll
         for (int y_start = 0; y_start < BM; y_start += A_LOAD_TILE_Y) {
             const int y = y_start + A_y;
-            cuda::memcpy_async((float4 *)&s_A[y][A_x], (float4 *)&A_block[y * K + A_x], sizeof(float4), pipeline);
+            cuda::memcpy_async((float4 *)&s_A[stage][y][A_x], (float4 *)&A_block[y * K + A_x], sizeof(float4),
+                               pipeline);
         }
+    };
+
+    auto fetch_B_block = [&](int k) {
+        const int stage = k % STAGES;
+        const float *B_block = B + bx * BN + k * BK * N;
 
         // load BK * BN tile of B into shared memory
 #pragma unroll
         for (int y_start = 0; y_start < BK; y_start += B_LOAD_TILE_Y) {
             const int y = y_start + B_y;
-            cuda::memcpy_async((float4 *)&s_B[y][B_x], (float4 *)&B_block[y * N + B_x], sizeof(float4), pipeline);
+            cuda::memcpy_async((float4 *)&s_B[stage][y][B_x], (float4 *)&B_block[y * N + B_x], sizeof(float4),
+                               pipeline);
         }
+    };
 
+    auto mma_compute = [&](int k) {
+        const int stage = k % STAGES;
+
+        float reg_A[TM];
+        float reg_B[TN];
+
+#pragma unroll
+        for (int tk = 0; tk < BK; tk++) {
+            // load s_A tile into reg_A
+#pragma unroll
+            for (int tm = 0; tm < TM; tm++) {
+                reg_A[tm] = s_A[stage][ty * TM + tm][tk]; // bank conflict
+            }
+
+            // load s_B tile into reg_B
+            // if TN > 4, split into sub-tiles to avoid bank conflict
+#pragma unroll
+            for (int tn = 0; tn < TN; tn += 4) {
+                *(float4 *)&reg_B[tn] = *(float4 *)&s_B[stage][tk][tn * BX + tx * 4];
+            }
+
+            // outer product
+#pragma unroll
+            for (int tm = 0; tm < TM; tm++) {
+#pragma unroll
+                for (int tn = 0; tn < TN; tn++) {
+                    sums[tm][tn] += reg_A[tm] * reg_B[tn];
+                }
+            }
+        }
+    };
+
+#pragma unroll
+    for (int k = 0; k < STAGES - 1; k++) {
+        pipeline.producer_acquire();
+        fetch_A_block(k);
+        fetch_B_block(k);
+        pipeline.producer_commit();
+    }
+
+    for (int k = STAGES - 1; k < K / BK; k++) {
+        if constexpr (STAGES > 1) {
+            pipeline.consumer_wait();
+        }
+        __syncthreads();
+
+        pipeline.producer_acquire();
+        fetch_A_block(k);
+        fetch_B_block(k);
         pipeline.producer_commit();
 
-        pipeline.consumer_wait();
-        __syncthreads();
+        if constexpr (STAGES == 1) {
+            pipeline.consumer_wait();
+            __syncthreads();
+        }
 
 #ifdef SGEMM_DEBUG
         if (bx == 0 && by == 0 && tid == 0) {
@@ -220,44 +280,22 @@ each sub-tiles, one thread only handles 16 bytes at a time.
         }
 #endif
 
-        static_assert(TN % 4 == 0, "unimplemented: TN is not multiple of 4");
-
-        float reg_A[TM];
-        float reg_B[TN];
-
-#pragma unroll
-        for (int tk = 0; tk < BK; tk++) {
-            // load s_A tile into reg_A
-#pragma unroll
-            for (int tm = 0; tm < TM; tm++) {
-                reg_A[tm] = s_A[ty * TM + tm][tk]; // bank conflict
-            }
-
-            // load s_B tile into reg_B
-            // if TN > 4, split into sub-tiles to avoid bank conflict
-#pragma unroll
-            for (int tn = 0; tn < TN; tn += 4) {
-                *(float4 *)&reg_B[tn] = *(float4 *)&s_B[tk][tn * BX + tx * 4];
-            }
-
-            // outer product
-#pragma unroll
-            for (int tm = 0; tm < TM; tm++) {
-#pragma unroll
-                for (int tn = 0; tn < TN; tn++) {
-                    sums[tm][tn] += reg_A[tm] * reg_B[tn];
-                }
-            }
-        }
+        mma_compute(k - (STAGES - 1));
 
         pipeline.consumer_release();
-        __syncthreads();
+    }
 
-        A_block += BK;
-        B_block += BK * N;
+    cuda::device::__pipeline_consumer_wait<0>(pipeline);
+    __syncthreads();
+
+#pragma unroll
+    for (int i = -(STAGES - 1); i < 0; i++) {
+        const int k = K / BK + i;
+        mma_compute(k);
     }
 
     // store sums to C
+    float *C_block = C + by * BM * N + bx * BN;
 #pragma unroll
     for (int tm = 0; tm < TM; tm++) {
 #pragma unroll
@@ -267,7 +305,7 @@ each sub-tiles, one thread only handles 16 bytes at a time.
     }
 }
 
-template <int BM = 32, int BN = 32, int BK = 32, int TM = 4, int TN = 4>
+template <int BM = 32, int BN = 32, int BK = 32, int TM = 4, int TN = 4, int STAGES = 1>
 void sgemm_v3(const float *A, const float *B, float *C, int M, int N, int K) {
     CHECK(N % BN == 0 && M % BM == 0 && K % BK == 0) << "invalid matrix dimensions";
 
@@ -280,7 +318,11 @@ void sgemm_v3(const float *A, const float *B, float *C, int M, int N, int K) {
 
     dim3 grid_dim(N / BN, M / BM);
     dim3 block_dim(BLOCK_DIM_X, BLOCK_DIM_Y);
-    sgemm_v3_kernel<BM, BN, BK, TM, TN><<<grid_dim, block_dim>>>(A, B, C, M, N, K);
+
+    auto kernel_fn = sgemm_v3_kernel<BM, BN, BK, TM, TN, STAGES>;
+    constexpr int smem_size = STAGES * (BM + BN) * BK * sizeof(float);
+    CHECK_CUDA(cudaFuncSetAttribute(kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+    kernel_fn<<<grid_dim, block_dim, smem_size>>>(A, B, C, M, N, K);
     CHECK_CUDA(cudaGetLastError());
 }
 
@@ -354,6 +396,9 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
             MAKE_ITEM(sgemm_v3<64, 64, 32, 4, 4>),
             MAKE_ITEM(sgemm_v3<64, 64, 64, 4, 8>),
             MAKE_ITEM(sgemm_v3<64, 64, 32, 8, 4>),
+            MAKE_ITEM(sgemm_v3<64, 64, 32, 4, 4, 2>),
+            MAKE_ITEM(sgemm_v3<64, 64, 64, 4, 8, 2>),
+            MAKE_ITEM(sgemm_v3<64, 64, 32, 8, 4, 2>),
         };
 
 #undef MAKE_ITEM
@@ -403,9 +448,8 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
     PerfRecord best_record = *std::min_element(
         records.begin(), records.end(), [](const PerfRecord &a, const PerfRecord &b) { return a.elapsed < b.elapsed; });
 
-    printf("[best] %s vs cublas: %.1f%% (%.3f vs %.3f ms)\n", best_record.name.c_str(),
-           cublas_record.elapsed / best_record.elapsed * 100.f, best_record.elapsed * 1e3f,
-           cublas_record.elapsed * 1e3f);
+    printf("[best] %s vs cublas: %.1f%% (%.1f vs %.1f TFLOPS)\n", best_record.name.c_str(),
+           cublas_record.elapsed / best_record.elapsed * 100.f, best_record.tflops, cublas_record.tflops);
 
     CHECK_CUBLAS(cublasDestroy(handle));
 
