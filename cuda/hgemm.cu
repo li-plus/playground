@@ -1212,7 +1212,12 @@ bool is_close_cuda(const half *A, const half *B, int N, float atol, float rtol) 
     return !h_failure;
 }
 
-std::vector<PerfRecord> perf(int M, int N, int K) {
+struct KernelRecord {
+    std::string name;
+    std::function<void(const half *, const half *, half *, int, int, int)> fn;
+};
+
+std::vector<PerfRecord> perf(int M, int N, int K, const std::string &kernel_name) {
     half *dA, *dB;
     CHECK_CUDA(cudaMalloc(&dA, M * K * sizeof(half)));
     CHECK_CUDA(cudaMalloc(&dB, K * N * sizeof(half)));
@@ -1244,33 +1249,38 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
     cublasHandle_t handle;
     CHECK_CUBLAS(cublasCreate(&handle));
 
-#define MAKE_ITEM(...) {#__VA_ARGS__, __VA_ARGS__}
+#define MAKE_KERNEL(...) {#__VA_ARGS__, __VA_ARGS__}
 
-    std::vector<std::tuple<std::string, std::function<void(const half *, const half *, half *, int, int, int)>>>
-        kernels{
-            {"cublas", [handle](const half *A, const half *B, half *C, int M, int N,
-                                int K) { hgemm_cublas(handle, A, B, C, M, N, K); }},
-            // MAKE_ITEM(hgemm_v1),
+    std::vector<KernelRecord> all_kernels{
+        MAKE_KERNEL(hgemm_v1),
 
-            // MAKE_ITEM(hgemm_v2<16, 16, 16>),
+        MAKE_KERNEL(hgemm_v2<16, 16, 16>),
 
-            // MAKE_ITEM(hgemm_v3<128, 128, 32, 2, 2>),
+        MAKE_KERNEL(hgemm_v3<128, 128, 32, 2, 2>),
 
-            // MAKE_ITEM(hgemm_v4<128, 128, 32, 2, 2, 2>),
+        MAKE_KERNEL(hgemm_v4<128, 128, 32, 2, 2, 2>),
 
-            // MAKE_ITEM(hgemm_mma_v1<>),
+        MAKE_KERNEL(hgemm_mma_v1<>),
 
-            // MAKE_ITEM(hgemm_mma_v2<128, 128, 32, 2, 2, 3, true, 2>),
+        MAKE_KERNEL(hgemm_mma_v2<128, 128, 32, 2, 2, 3, true, 2>),
 
-            MAKE_ITEM(hgemm_mma_v3<128, 128, 32, 2, 2, 4, 8>),
-            MAKE_ITEM(hgemm_mma_v3<256, 128, 32, 4, 2, 4, 4>),
-            MAKE_ITEM(hgemm_mma_v3<256, 128, 32, 4, 2, 4, 8>),
-            MAKE_ITEM(hgemm_mma_v3<128, 256, 32, 2, 4, 4, 8>),
+        MAKE_KERNEL(hgemm_mma_v3<128, 128, 32, 2, 2, 4, 8>),
+        MAKE_KERNEL(hgemm_mma_v3<256, 128, 32, 4, 2, 4, 4>),
+        MAKE_KERNEL(hgemm_mma_v3<256, 128, 32, 4, 2, 4, 8>),
+        MAKE_KERNEL(hgemm_mma_v3<128, 256, 32, 2, 4, 4, 8>),
 
-            // MAKE_ITEM(hgemm),
-        };
+        MAKE_KERNEL(hgemm),
+    };
 
-#undef MAKE_ITEM
+#undef MAKE_KERNEL
+
+    // select kernels based on args
+    std::vector<KernelRecord> kernels{
+        {"cublas", [handle](const half *A, const half *B, half *C, int M, int N,
+                            int K) { hgemm_cublas(handle, A, B, C, M, N, K); }},
+    };
+    std::copy_if(all_kernels.begin(), all_kernels.end(), std::back_inserter(kernels),
+                 [&kernel_name](const KernelRecord &x) { return x.name.find(kernel_name) != std::string::npos; });
 
     printf("----- M=%d N=%d K=%d -----\n", M, N, K);
 
@@ -1281,30 +1291,27 @@ std::vector<PerfRecord> perf(int M, int N, int K) {
 
     hgemm_cublas(handle, dA, dB, dC_ref, M, N, K);
 
-    for (const auto &item : kernels) {
-        const auto &name = std::get<0>(item);
-        const auto &fn = std::get<1>(item);
-
+    for (const auto &kernel : kernels) {
         half *dC_opt;
         CHECK_CUDA(cudaMalloc(&dC_opt, M * N * sizeof(half)));
         CHECK_CUDA(cudaMemset(dC_opt, 0, M * N * sizeof(half)));
 
-        fn(dA, dB, dC_opt, M, N, K);
+        kernel.fn(dA, dB, dC_opt, M, N, K);
 
         if (!is_close_cuda(dC_ref, dC_opt, M * N, 1e-3f, 1e-2f)) {
             // TODO: use gpu
             check_is_close_d(dC_ref, dC_opt, M * N, 1e-3f);
         }
 
-        auto perf_fn = [=] { fn(dA, dB, dC_opt, M, N, K); };
-        const float elapsed = timeit(perf_fn, 2, 10);
+        auto perf_fn = [=] { kernel.fn(dA, dB, dC_opt, M, N, K); };
+        const float elapsed = timeit(perf_fn, 2, 20);
 
         const double tflops = (2ull * M * N * K) * 1e-12 / elapsed;
         const float bandwidth = (M * K + K * N + M * N) * sizeof(half) * 1e-9f / elapsed;
 
-        printf("[%s] elapsed %.3f us, %.1f TFLOPS, %.3f GB/s\n", name.c_str(), elapsed * 1e6, tflops, bandwidth);
+        printf("[%s] elapsed %.3f us, %.1f TFLOPS, %.3f GB/s\n", kernel.name.c_str(), elapsed * 1e6, tflops, bandwidth);
 
-        records.emplace_back(PerfRecord(M, N, K, name, elapsed, tflops));
+        records.emplace_back(PerfRecord(M, N, K, kernel.name, elapsed, tflops));
 
         CHECK_CUDA(cudaFree(dC_opt));
     }
@@ -1377,13 +1384,14 @@ struct Args {
     int N = 8192;
     int K = 8192;
     std::vector<int> sizes;
+    std::string kernel_name;
 };
 
 Args parse_args(int argc, char **argv) {
     Args args;
 
     int opt;
-    while ((opt = getopt(argc, argv, "M:N:K:S:h")) != -1) {
+    while ((opt = getopt(argc, argv, "M:N:K:S:k:h")) != -1) {
         switch (opt) {
         case 'M':
             args.M = atoi(optarg);
@@ -1397,6 +1405,9 @@ Args parse_args(int argc, char **argv) {
         case 'S':
             args.sizes = parse_sizes(optarg);
             break;
+        case 'k':
+            args.kernel_name = optarg;
+            break;
         case 'h':
             printf("Usage: %s [-M size] [-N size] [-K size] [-S sizes]\n", argv[0]);
             printf("Options:\n");
@@ -1406,10 +1417,11 @@ Args parse_args(int argc, char **argv) {
             printf("  -S sizes   Set square matrix sizes. Format:\n");
             printf("             start:stop:step (e.g., 1024:8192:1024)\n");
             printf("             or comma-separated (e.g., 1024,2048,4096)\n");
+            printf("  -k name    Filter kernel name (default: all)\n");
             printf("  -h         Show this help message\n");
             exit(EXIT_SUCCESS);
         default:
-            fprintf(stderr, "Usage: %s [-M size] [-N size] [-K size] [-S sizes]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [-M size] [-N size] [-K size] [-S sizes] [-k name]\n", argv[0]);
             exit(EXIT_FAILURE);
         }
     }
@@ -1425,13 +1437,13 @@ int main(int argc, char **argv) {
 #endif
 
     if (args.sizes.empty()) {
-        perf(args.M, args.N, args.K);
+        perf(args.M, args.N, args.K, args.kernel_name);
         return 0;
     }
 
     std::vector<PerfRecord> all_records;
     for (int size : args.sizes) {
-        auto records = perf(size, size, size);
+        auto records = perf(size, size, size, args.kernel_name);
         all_records.insert(all_records.end(), records.begin(), records.end());
     }
     save_result("output/hgemm_bench_square.csv", all_records);
