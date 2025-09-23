@@ -6,13 +6,39 @@
 #include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <thread>
 #include <vector>
 
+template <typename T>
+class Queue {
+  public:
+    Queue() = default;
+
+    void push(const T &value) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        queue_.push(value);
+        condition_.notify_one();
+    }
+
+    T pop() {
+        std::unique_lock<std::mutex> lock(mtx_);
+        condition_.wait(lock, [this] { return !queue_.empty(); });
+        auto result = std::move(queue_.front());
+        queue_.pop();
+        return result;
+    }
+
+  private:
+    std::mutex mtx_;
+    std::condition_variable condition_;
+    std::queue<T> queue_;
+};
+
 class ThreadPool {
   public:
-    ThreadPool(size_t size) : shutdown_(false) {
+    ThreadPool(size_t size) {
         workers_.reserve(size);
         for (size_t i = 0; i < size; i++) {
             workers_.emplace_back([this, i] { worker(i); });
@@ -20,8 +46,9 @@ class ThreadPool {
     }
 
     virtual ~ThreadPool() {
-        shutdown_ = true;
-        cv_.notify_all();
+        for (size_t i = 0; i < workers_.size(); i++) {
+            tasks_.push(std::nullopt);
+        }
 
         for (auto &thread : workers_) {
             thread.join();
@@ -29,43 +56,31 @@ class ThreadPool {
     }
 
     template <typename F, typename... Args>
-    std::future<typename std::invoke_result<F, Args...>::type> submit(F f, Args... args) {
-        using return_type = typename std::invoke_result<F, Args...>::type;
+    std::future<std::invoke_result_t<F, Args...>> submit(F f, Args... args) {
+        using return_type = std::invoke_result_t<F, Args...>;
 
         auto task = std::make_shared<std::packaged_task<return_type()>>(
             std::bind(std::forward<F>(f), std::forward<Args>(args)...));
 
         std::future<return_type> result = task->get_future();
-        {
-            std::lock_guard<std::mutex> lk(m_);
-            tasks_.emplace([task] { (*task)(); });
-        }
-        cv_.notify_one();
+        tasks_.push([task] { (*task)(); });
         return result;
     }
 
   private:
     void worker(size_t i) {
         while (true) {
-            std::function<void(void)> task;
-            {
-                std::unique_lock<std::mutex> lk(m_);
-                cv_.wait(lk, [this] { return !tasks_.empty() || shutdown_; });
-                if (tasks_.empty()) {
-                    break;
-                }
-                task = std::move(tasks_.front());
-                tasks_.pop();
+            auto maybe_task = tasks_.pop();
+            if (!maybe_task) {
+                break;
             }
+            auto task = *maybe_task;
             task();
         }
     }
 
   private:
-    bool shutdown_;
-    std::mutex m_;
-    std::condition_variable cv_;
-    std::queue<std::function<void(void)>> tasks_;
+    Queue<std::optional<std::function<void(void)>>> tasks_;
     std::vector<std::thread> workers_;
 };
 
@@ -102,6 +117,7 @@ int main() {
     }
 
     for (auto &result : results) {
+        // print results in submission order
         try {
             const std::string msg = result.get();
             std::cout << msg << std::endl;
