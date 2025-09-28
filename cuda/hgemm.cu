@@ -1114,6 +1114,194 @@ void hgemm_mma_v3(const half *A, const half *B, half *C, int M, int N, int K) {
     CHECK_CUDA(cudaGetLastError());
 }
 
+// https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-matrix-instructions-wgmma-mma
+template <int SCALE_D, int SCALE_A, int SCALE_B, int TRANS_A, int TRANS_B>
+__device__ __forceinline__ void wgmma_64x64x16(uint *d, uint64_t a_desc, uint64_t b_desc) {
+    asm volatile("wgmma.mma_async.sync.aligned.m64n64k16.f16.f16.f16 "
+                 "{%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15}, "
+                 "%16, %17, "
+                 "%18, %19, %20, %21, %22;"
+                 : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3]), "+r"(d[4]), "+r"(d[5]), "+r"(d[6]), "+r"(d[7]),
+                   "+r"(d[8]), "+r"(d[9]), "+r"(d[10]), "+r"(d[11]), "+r"(d[12]), "+r"(d[13]), "+r"(d[14]), "+r"(d[15])
+                 : "l"(a_desc), "l"(b_desc), "n"(SCALE_D), "n"(SCALE_A), "n"(SCALE_B), "n"(TRANS_A), "n"(TRANS_B));
+}
+
+__device__ __forceinline__ void wgmma_commit_group() { asm volatile("wgmma.commit_group.sync.aligned;" ::: "memory"); }
+
+template <int N>
+__device__ __forceinline__ void wgmma_wait_group() {
+    static_assert(N >= 0);
+    asm volatile("wgmma.wait_group.sync.aligned %0;" ::"n"(N) : "memory");
+}
+
+__device__ __forceinline__ void wgmma_fence() { asm volatile("wgmma.fence.sync.aligned;" ::: "memory"); }
+
+__device__ __forceinline__ void async_proxy_fence() { asm volatile("fence.proxy.async;" ::: "memory"); }
+
+template <typename T>
+__device__ __forceinline__ constexpr uint16_t matrix_descriptor_encode(T x) {
+    static_assert(std::is_integral_v<T>, "unimplemented: only support integral types");
+    return (x >> 4) & 0x3fff;
+}
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-matrix-shared-memory-layout-matrix-descriptor
+__device__ __forceinline__ uint64_t make_matrix_desc(uint16_t start_addr, uint16_t leading_byte_offset,
+                                                     uint16_t stride_byte_offset, uint8_t base_offset,
+                                                     uint8_t layout_type) {
+    // TODO: lop3
+    uint64_t desc = 0;
+    desc |= start_addr & 0x3fff;
+    desc |= (leading_byte_offset & 0x3fff) << 16;
+    desc |= (stride_byte_offset & 0x3fffull) << 32;
+    desc |= (base_offset & 0x7ull) << 49;
+    desc |= (layout_type & 0x3ull) << 62;
+    return desc;
+
+    // union {
+    //     struct {
+    //         uint16_t start_addr : 14, : 2;
+    //         uint16_t leading_byte_offset : 14, : 2;
+    //         uint16_t stride_byte_offset : 14, : 2;
+    //         uint8_t : 1, base_offset : 3, : 4;
+    //         uint8_t : 6, layout_type : 2;
+    //     } bits;
+    //     uint64_t desc;
+    // } m;
+
+    // static_assert(sizeof(m) == sizeof(uint64_t));
+
+    // m.bits.start_addr = start_addr;
+    // m.bits.leading_byte_offset = leading_byte_offset;
+    // m.bits.stride_byte_offset = stride_byte_offset;
+    // m.bits.base_offset = base_offset;
+    // m.bits.layout_type = layout_type;
+
+    // return m.desc;
+}
+
+__device__ __forceinline__ void warpgroup_fence_operand(uint32_t &reg) { asm volatile("" : "+r"(reg)::"memory"); }
+
+// wgmma kernel
+template <int GMMA_M, int GMMA_N, int GMMA_K>
+__global__ void hgemm_sm90_v1_kernel(const half *__restrict__ A, const half *__restrict__ B, half *__restrict__ C,
+                                     int M, int N, int K) {
+    // clang-format off
+    /*
+A Layout: K major                                               B Layout: N major
+            K (contiguous)                                            K
+    +-------------+-------------+                       +-------------+-------------+
+    | 0 ------- 7 | 64 ----- 71 |                       | 0  8 ... 56 | 512 ... 568 |
+    | 8 ------ 15 | 72 ----- 79 |                       | 1  9 ... 57 | 513 ... 569 |
+    | .         . | .         . |                       | |  |      | |  |       |  |
+    | 56 ----- 63 | 120 --- 127 |                       | 7  15 .. 63 | 519 ... 575 |
+    +-------------+-------------+                       +-------------+-------------+
+    | 128 --- 135 | 192 --- 199 |                       | 64 72 . 120 | 576 ... 632 |
+    | 136 --- 143 | 200 --- 207 |                       | 65 73 . 121 | 577 ... 633 |
+  M | .         . | .         . |        N (contiguous) | |  |     |  |  |       |  |
+    | 184 --- 191 | 248 --- 255 |                       | 71 79 . 127 | 583 ... 639 |
+    +-------------+-------------+                       +-------------+-------------+
+    | ......................... |                       | ......................... |
+    +-------------+-------------+                       +-------------+-------------+
+    | 896 --- 703 | 960 --- 967 |                       | 448 ... 504 | 960 .. 1016 |
+    | 704 --- 711 | 968 --- 975 |                       | 449 ... 505 | 961 .. 1027 |
+    | .         . | .         . |                       |  |       |  |  |       |  |
+    | 952 --- 959 | 1016 - 1023 |                       | 455 ... 511 | 967 .. 1023 |
+    +-------------+-------------+                       +-------------+-------------+
+    */
+    // clang-format on
+    static_assert(GMMA_M == 64 && GMMA_N == 64 && GMMA_K == 16, "unimplemented: only support m64n64k16");
+
+    const int bx = blockIdx.x;
+    const int by = blockIdx.y;
+    const int tx = threadIdx.x;
+    const int tid = tx;
+
+    const int wid = tid / WARP_SIZE;
+    const int lid = tid % WARP_SIZE;
+
+    __shared__ half s_A[GMMA_M * GMMA_K]; // 64 * 16, K-major, non-transposed
+    __shared__ half s_B[GMMA_K * GMMA_N]; // 16 * 64, N-major, transposed
+
+    const half *A_block = A + by * GMMA_M * K;
+    const half *B_block = B + bx * GMMA_N;
+
+    uint d_frags[16]{};
+
+    uint64_t a_desc =
+        make_matrix_desc(matrix_descriptor_encode((uint64_t)s_A), matrix_descriptor_encode(8 * 8 * sizeof(half)),
+                         matrix_descriptor_encode(8 * GMMA_K * sizeof(half)), 0, 0);
+    uint64_t b_desc =
+        make_matrix_desc(matrix_descriptor_encode((uint64_t)s_B), matrix_descriptor_encode(8 * GMMA_N * sizeof(half)),
+                         matrix_descriptor_encode(8 * 8 * sizeof(half)), 0, 0);
+
+    for (int k = 0; k < K; k += GMMA_K) {
+
+        const int A_x = tid * 8 % GMMA_K;
+        const int A_y = tid * 8 / GMMA_K;
+        const int s_A_x = tid / 2 % 8;
+        const int s_A_y = tid % 2 + tid / 16 * 2;
+        *(float4 *)&s_A[(s_A_y * 8 + s_A_x) * 8] = *(float4 *)&A_block[A_y * K + A_x];
+
+        const int B_x = tid * 8 % GMMA_N;
+        const int B_y = tid * 8 / GMMA_N;
+        const int s_B_x = tid % 64 / 8;
+        const int s_B_y = tid / 64 * 8 + tid % 8;
+        *(float4 *)&s_B[(s_B_y * 8 + s_B_x) * 8] = *(float4 *)&B_block[B_y * N + B_x];
+
+        __syncthreads();
+
+#if 0
+        if (bx + by + tid == 0) {
+            for (int i = 0; i < GMMA_M; i++) {
+                printf("s_A[%d]: ", i);
+                for (int j = 0; j < GMMA_K; j++) {
+                    printf("%.3f ", __half2float(s_A[i * GMMA_K + j]));
+                }
+                printf("\n");
+            }
+            for (int i = 0; i < GMMA_N; i++) {
+                printf("s_B[%d]: ", i);
+                for (int j = 0; j < GMMA_K; j++) {
+                    printf("%.3f ", __half2float(s_B[i * GMMA_K + j]));
+                }
+                printf("\n");
+            }
+        }
+        __syncthreads();
+#endif
+
+        async_proxy_fence(); // https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-matrix-instructions
+        wgmma_fence();
+        wgmma_64x64x16<1, 1, 1, 0, 1>(d_frags, a_desc, b_desc);
+        wgmma_commit_group();
+        wgmma_wait_group<0>();
+
+        __syncthreads();
+
+        A_block += GMMA_K;
+        B_block += GMMA_K * N;
+    }
+
+    half *C_block = C + by * GMMA_M * N + bx * GMMA_N;
+    const int C_y = wid * 16 + lid / 4;
+    const int C_x = lid % 4 * 2;
+#pragma unroll
+    for (int x = 0; x < 8; x++) {
+#pragma unroll
+        for (int y = 0; y < 2; y++) {
+            *(uint *)&C_block[(C_y + y * 8) * N + C_x + x * 8] = d_frags[x * 2 + y];
+        }
+    }
+}
+
+template <int GMMA_M = 64, int GMMA_N = 64, int GMMA_K = 16>
+void hgemm_sm90_v1(const half *__restrict__ A, const half *__restrict__ B, half *__restrict__ C, int M, int N, int K) {
+    CHECK(M % GMMA_M == 0 && N % GMMA_N == 0 && K % GMMA_K == 0) << "unimplemented: invalid matrix dimensions";
+    dim3 grid_dim(N / GMMA_N, M / GMMA_M);
+    hgemm_sm90_v1_kernel<GMMA_M, GMMA_N, GMMA_K><<<grid_dim, 128>>>(A, B, C, M, N, K);
+    CHECK_CUDA(cudaGetLastError());
+}
+
 void hgemm_cublas(cublasHandle_t handle, const half *A, const half *B, half *C, int M, int N, int K) {
     const half alpha = __float2half(1);
     const half beta = __float2half(0);
@@ -1205,7 +1393,7 @@ struct KernelRecord {
 std::vector<PerfRecord> perf(int M, int N, int K, const std::string &kernel_name) {
     thrust::device_vector<half> dA(M * K), dB(K * N);
 
-#ifndef HGEMM_DEBUG
+#if 0
     const float rsqrt_K = 1.f / std::sqrt(K);
     uniform_cuda(dA.data().get(), M * K, -rsqrt_K, rsqrt_K);
     uniform_cuda(dB.data().get(), K * N, -rsqrt_K, rsqrt_K);
@@ -1214,11 +1402,11 @@ std::vector<PerfRecord> perf(int M, int N, int K, const std::string &kernel_name
         thrust::host_vector<half> hA(M * K), hB(K * N);
 
         for (int i = 0; i < M * K; i++) {
-            hA[i] = __float2half(i / 100.f);
+            hA[i] = __float2half(i / 1000.f);
         }
 
         for (int i = 0; i < K * N; i++) {
-            hB[i] = __float2half(i / 100.f);
+            hB[i] = __float2half(i / 1000.f);
         }
 
         dA = hA;
@@ -1232,19 +1420,21 @@ std::vector<PerfRecord> perf(int M, int N, int K, const std::string &kernel_name
 #define MAKE_KERNEL(...) {#__VA_ARGS__, __VA_ARGS__}
 
     std::vector<KernelRecord> all_kernels{
-        MAKE_KERNEL(hgemm_v1),
+        // MAKE_KERNEL(hgemm_v1),
 
-        MAKE_KERNEL(hgemm_v2<16, 16, 16>),
+        // MAKE_KERNEL(hgemm_v2<16, 16, 16>),
 
-        MAKE_KERNEL(hgemm_v3<128, 128, 32, 2, 2>),
+        // MAKE_KERNEL(hgemm_v3<128, 128, 32, 2, 2>),
 
-        MAKE_KERNEL(hgemm_v4<128, 128, 32, 2, 2, 2>),
+        // MAKE_KERNEL(hgemm_v4<128, 128, 32, 2, 2, 2>),
 
-        MAKE_KERNEL(hgemm_mma_v1<>),
+        // MAKE_KERNEL(hgemm_mma_v1<>),
 
-        MAKE_KERNEL(hgemm_mma_v2<128, 128, 32, 2, 2, 3, true, 2>),
+        // MAKE_KERNEL(hgemm_mma_v2<128, 128, 32, 2, 2, 3, true, 2>),
 
-        MAKE_KERNEL(hgemm_mma_v3<128, 256, 32, 4, 2, 4, 8>),
+        // MAKE_KERNEL(hgemm_mma_v3<128, 256, 32, 4, 2, 4, 8>),
+
+        MAKE_KERNEL(hgemm_sm90_v1<64, 64, 16>),
 
         // {"hgemm_llm", hgemm},
     };
@@ -1252,13 +1442,11 @@ std::vector<PerfRecord> perf(int M, int N, int K, const std::string &kernel_name
 #undef MAKE_KERNEL
 
     // select kernels based on args
-    std::vector<KernelRecord> kernels{
-        {"cublas", [handle](const half *A, const half *B, half *C, int M, int N,
-                            int K) { hgemm_cublas(handle, A, B, C, M, N, K); }},
-    };
+    std::vector<KernelRecord> kernels{{"cublas", [handle](const half *A, const half *B, half *C, int M, int N, int K) {
+                                           hgemm_cublas(handle, A, B, C, M, N, K);
+                                       }}};
     std::copy_if(all_kernels.begin(), all_kernels.end(), std::back_inserter(kernels),
                  [&kernel_name](const KernelRecord &x) { return x.name.find(kernel_name) != std::string::npos; });
-
     printf("----- M=%d N=%d K=%d -----\n", M, N, K);
 
     std::vector<PerfRecord> records;
@@ -1396,8 +1584,8 @@ Args parse_args(int argc, char **argv) {
 int main(int argc, char **argv) {
     Args args = parse_args(argc, argv);
 
-#ifdef HGEMM_DEBUG
-    perf(16, 8, 16, "mma_v1");
+#if 1
+    perf(64, 64, 16, "sm90_v1");
     return 0;
 #endif
 
