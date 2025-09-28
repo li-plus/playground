@@ -10,14 +10,20 @@ struct Config {
 }
 
 impl Config {
-    fn parse() -> Result<Config, String> {
-        let args: Vec<String> = env::args().collect();
-        if args.len() < 3 {
-            return Err(String::from("Not enough arguments"));
-        }
+    fn parse() -> Result<Config, &'static str> {
+        let mut args = env::args();
 
-        let query = args[1].clone();
-        let file_path = args[2].clone();
+        args.next();
+
+        let Some(query) = args.next() else {
+            return Err("Didn't get a query string");
+        };
+
+        let file_path = match args.next() {
+            Some(arg) => arg,
+            None => return Err("Didn't get a file path"),
+        };
+
         let ignore_case = env::var("IGNORE_CASE").is_ok();
 
         Ok(Config {

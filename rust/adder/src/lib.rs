@@ -1,3 +1,11 @@
+/// Adds two numbers.
+///
+/// # Examples
+///
+/// ```
+/// let answer = adder::add(1, 2);
+/// assert_eq!(3, answer);
+/// ```
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
 }

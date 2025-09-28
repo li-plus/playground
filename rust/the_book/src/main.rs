@@ -596,6 +596,641 @@ fn basic_lifetime() {
     println!("{s}");
 }
 
+fn basic_closure() {
+    println!("===== closure =====");
+
+    let mut list = vec![1, 2, 3];
+
+    // immutable
+    let immutable_closure = || println!("immutable closure: {list:?}");
+    immutable_closure();
+
+    // mutable
+    println!("Before mutable closure: {list:?}");
+    let mut mutable_closure = || list.push(4);
+    // println!("Before mutable closure: {list:?}"); // error[E0502]: cannot borrow `list` as immutable because it is also borrowed as mutable
+    mutable_closure();
+    println!("After mutable closure: {list:?}");
+    // mutable_closure(); // error[E0502]: cannot borrow `list` as immutable because it is also borrowed as mutable
+
+    // move
+    use std::thread;
+    thread::spawn(move || println!("Thread spawned with list: {list:?}"))
+        .join()
+        .unwrap();
+}
+
+fn basic_iterator() {
+    println!("===== iterator =====");
+
+    let v1 = vec![1, 2, 3];
+
+    // iter
+    let mut v1_iter = v1.iter();
+
+    assert_eq!(v1_iter.next(), Some(&1));
+    assert_eq!(v1_iter.next(), Some(&2));
+    assert_eq!(v1_iter.next(), Some(&3));
+    assert_eq!(v1_iter.next(), None);
+    assert_eq!(v1_iter.next(), None);
+
+    // iter_mut
+    let mut v1 = vec![1, 2, 3];
+    for v in v1.iter_mut() {
+        *v += 1;
+    }
+    assert_eq!(v1, vec![2, 3, 4]);
+
+    // into_iter
+    let v1 = vec![1, 2, 3];
+    let v1_into: Vec<_> = v1.into_iter().collect(); // v1 is moved
+    assert_eq!(v1_into, vec![1, 2, 3]);
+
+    // consuming iter
+    let v1 = vec![1, 2, 3];
+    let v1_iter = v1.iter();
+    let total: i32 = v1_iter.sum();
+    assert_eq!(total, 6);
+
+    // map
+    let v2: Vec<_> = v1.iter().map(|x| x + 1).collect();
+    assert_eq!(v2, vec![2, 3, 4]);
+
+    // filter
+    let v2: Vec<_> = v1.into_iter().filter(|x| x % 2 == 1).collect();
+    assert_eq!(v2, vec![1, 3]);
+}
+
+fn basic_smart_pointers() {
+    println!("===== smart pointers =====");
+
+    let x = 5;
+    let y = Box::new(x); // smart pointer with data on heap
+    assert_eq!(x, *y); // deref
+
+    struct MyBox<T>(T);
+
+    impl<T> MyBox<T> {
+        fn new(x: T) -> MyBox<T> {
+            MyBox(x)
+        }
+    }
+
+    use std::ops::Deref;
+
+    impl<T> Deref for MyBox<T> {
+        type Target = T;
+
+        fn deref(&self) -> &Self::Target {
+            return &self.0;
+        }
+    }
+
+    let y = MyBox::new(5);
+    assert_eq!(x, *y); // equivalent to *(y.deref())
+
+    // deref coercion
+    fn hello(name: &str) {
+        println!("Hello, {name}!");
+    }
+    let m = MyBox::new(String::from("Rust"));
+    hello(&m); // &MyBox<String> -> &String -> str
+
+    // Rc: shared ptr with reference counter
+    use std::rc::Rc;
+
+    #[derive(Debug)]
+    #[allow(unused)]
+    enum List {
+        Cons(i32, Rc<List>),
+        Nil,
+    }
+    use List::{Cons, Nil};
+
+    let a = Rc::new(Cons(5, Rc::new(Cons(10, Rc::new(Nil)))));
+    println!("a = {a:?}");
+    println!("count after creating a = {}", Rc::strong_count(&a));
+    let _b = Cons(3, Rc::clone(&a));
+    println!("count after creating b = {}", Rc::strong_count(&a));
+    {
+        let _c = Cons(4, Rc::clone(&a));
+        println!("count after creating c = {}", Rc::strong_count(&a));
+    }
+    println!("count after c goes out of scope = {}", Rc::strong_count(&a));
+
+    // RefCell<T>: borrow rule at runtime
+    use std::cell::RefCell;
+    let x = Rc::new(RefCell::new(5));
+    let a = Rc::clone(&x);
+    let b = Rc::clone(&x);
+    *a.borrow_mut() += 1;
+    *b.borrow_mut() += 1;
+    println!("x = {}", x.borrow());
+
+    // Weak<T>: avoid reference cycles
+    use std::rc::Weak;
+
+    #[derive(Debug)]
+    #[allow(unused)]
+    struct Node {
+        value: i32,
+        parent: RefCell<Weak<Node>>,
+        children: Vec<Rc<Node>>,
+    }
+
+    let leaf = Rc::new(Node {
+        value: 5,
+        parent: RefCell::new(Weak::new()),
+        children: vec![],
+    });
+    {
+        let branch = Rc::new(Node {
+            value: 10,
+            parent: RefCell::new(Weak::new()),
+            children: vec![Rc::clone(&leaf)],
+        });
+        *leaf.parent.borrow_mut() = Rc::downgrade(&branch);
+
+        println!("leaf = {leaf:?}");
+        println!("branch = {branch:?}");
+        println!("leaf parent = {:?}", leaf.parent.borrow().upgrade());
+        println!(
+            "leaf strong = {}, weak = {}",
+            Rc::strong_count(&leaf),
+            Rc::weak_count(&leaf)
+        );
+        println!(
+            "branch strong = {}, weak = {}",
+            Rc::strong_count(&branch),
+            Rc::weak_count(&branch)
+        );
+    }
+    println!(
+        "after branch dropped: leaf strong = {}, weak = {}",
+        Rc::strong_count(&leaf),
+        Rc::weak_count(&leaf)
+    );
+}
+
+fn basic_concurrency() {
+    println!("===== concurrency =====");
+
+    // channel
+    use std::sync::mpsc;
+    use std::thread;
+    let (tx, rx) = mpsc::channel();
+
+    let tx1 = tx.clone();
+
+    thread::spawn(move || {
+        let val = String::from("hello");
+        tx.send(val).unwrap();
+    });
+    thread::spawn(move || {
+        let val = String::from("world");
+        tx1.send(val).unwrap();
+    });
+
+    for received in rx {
+        println!("Got: {received}");
+    }
+
+    // mutex
+    use std::sync::{Arc, Mutex};
+    let m = Mutex::new(5);
+    {
+        let mut num = m.lock().unwrap();
+        *num = 6;
+    } // MutexGuard dropped, unlock automatically
+
+    println!("m = {m:?}");
+
+    // Atomic Reference Counting with Arc<T>
+    let counter = Arc::new(Mutex::new(0));
+    let mut handles = Vec::with_capacity(10);
+    for _ in 0..10 {
+        let counter = Arc::clone(&counter);
+        let handle = thread::spawn(move || {
+            let mut x;
+            {
+                let num = counter.lock().unwrap();
+                x = num;
+            }
+            *x += 1;
+        });
+        handles.push(handle);
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    println!("Result: {}", counter.lock().unwrap());
+}
+
+fn basic_async() {
+    println!("===== async =====");
+
+    // trpl: The Rust Programming Language
+    use std::thread;
+    use std::time::Duration;
+    use trpl::Html;
+
+    async fn page_title(url: &str) -> Option<String> {
+        let response = trpl::get(url).await;
+        let response_text = response.text().await;
+        Html::parse(&response_text)
+            .select_first("title")
+            .map(|title_element| title_element.inner_html())
+    }
+
+    trpl::run(async {
+        let url = "https://www.rust-lang.org";
+        match page_title(url).await {
+            Some(title) => println!("The title for {url} was {title}"),
+            None => println!("{url} had no title"),
+        }
+    });
+
+    trpl::run(async {
+        let fut1 = async {
+            for i in 0..5 {
+                println!("hi number {i} from the first task!");
+                trpl::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let fut2 = async {
+            for i in 0..3 {
+                println!("hi number {i} from the second task!");
+                trpl::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        // similar to asyncio.create_task
+        let fut3 = trpl::spawn_task(async {
+            for i in 0..3 {
+                println!("hi number {i} from the third task!");
+                trpl::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        trpl::sleep(Duration::from_millis(20)).await;
+        // at this point, fut1 & fut2 are not running, fut3 is running
+        // if not joining the future, task3 will be terminated when this main async block is done
+        trpl::join(fut1, fut2).await;
+        fut3.await.unwrap();
+    });
+
+    trpl::run(async {
+        // similar to asyncio.Queue
+        let (tx, mut rx) = trpl::channel();
+        let tx1 = tx.clone();
+
+        let tx_fut = async move {
+            let vals = vec![
+                String::from("hi"),
+                String::from("from"),
+                String::from("the"),
+                String::from("future"),
+            ];
+            for val in vals {
+                tx.send(val).unwrap();
+                trpl::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let tx1_fut = async move {
+            let vals = vec![
+                String::from("more"),
+                String::from("messages"),
+                String::from("for"),
+                String::from("you"),
+            ];
+            for val in vals {
+                tx1.send(val).unwrap();
+                trpl::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let rx_fut = async {
+            // when tx and tx1 is dropped, rx.recv() returns None
+            while let Some(val) = rx.recv().await {
+                println!("received: '{val}'");
+            }
+        };
+        trpl::join!(tx_fut, tx1_fut, rx_fut);
+    });
+
+    // yield control to executor
+    trpl::run(async {
+        let slow = async {
+            println!("'slow' started.");
+            trpl::sleep(Duration::from_millis(10)).await;
+            println!("'slow' finished."); // won't print
+        };
+
+        let fast = async {
+            println!("'fast' started.");
+            trpl::sleep(Duration::from_millis(5)).await;
+            println!("'fast' finished.");
+        };
+
+        trpl::race(slow, fast).await;
+    });
+
+    trpl::run(async {
+        let one_ns = Duration::from_nanos(1);
+        use std::time::Instant;
+
+        let start = Instant::now();
+        async {
+            for _ in 1..1000 {
+                trpl::sleep(one_ns).await;
+            }
+        }
+        .await;
+        let time = Instant::now() - start;
+        println!(
+            "'sleep' version finished after {} seconds.",
+            time.as_secs_f32()
+        );
+
+        let start = Instant::now();
+        async {
+            for _ in 1..1000 {
+                trpl::yield_now().await;
+            }
+        }
+        .await;
+        let time = Instant::now() - start;
+        println!(
+            "'yield' version finished after {} seconds.",
+            time.as_secs_f32()
+        );
+    });
+
+    trpl::run(async {
+        use trpl::StreamExt;
+
+        let values = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let iter = values.iter().map(|n| n * 2);
+        let mut stream = trpl::stream_from_iter(iter);
+
+        // stream is like async iterator
+        while let Some(value) = stream.next().await {
+            println!("The value was: {value}");
+        }
+    });
+
+    trpl::run(async {
+        use std::pin::pin;
+        use trpl::{ReceiverStream, Stream, StreamExt};
+
+        fn get_messages() -> impl Stream<Item = String> {
+            let (tx, rx) = trpl::channel();
+
+            trpl::spawn_task(async move {
+                let messages = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
+                for (index, message) in messages.into_iter().enumerate() {
+                    let time_to_sleep = if index % 2 == 0 { 10 } else { 30 };
+                    trpl::sleep(Duration::from_millis(time_to_sleep)).await;
+                    tx.send(format!("Message: '{message}'")).unwrap();
+                }
+            });
+
+            ReceiverStream::new(rx)
+        }
+
+        let mut messages = pin!(get_messages().timeout(Duration::from_millis(20)));
+
+        while let Some(result) = messages.next().await {
+            match result {
+                Ok(message) => println!("{message}"),
+                Err(reason) => eprintln!("Problem: {reason:?}"),
+            }
+        }
+    });
+
+    {
+        // thread and as
+        let (tx, mut rx) = trpl::channel();
+
+        thread::spawn(move || {
+            for i in 1..11 {
+                tx.send(i).unwrap();
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        trpl::run(async {
+            while let Some(message) = rx.recv().await {
+                println!("{message}");
+            }
+        });
+    }
+}
+
+fn basic_patterns() {
+    println!("===== patterns =====");
+
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+
+    let p = Point { x: 0, y: 7 };
+
+    // Destructuring Structs
+    let Point { x: a, y: b } = p;
+    assert_eq!(0, a);
+    assert_eq!(7, b);
+
+    // Destructuring Structs
+    let Point { x, y } = p;
+    assert_eq!(0, x);
+    assert_eq!(7, y);
+
+    let p = Point { x: 0, y: 7 };
+
+    match p {
+        Point { x, y: 0 } => println!("On the x axis at {x}"),
+        Point { x: 0, y } => println!("On the y axis at {y}"),
+        Point { x, y } => {
+            println!("On neither axis: ({x}, {y})");
+        }
+    }
+
+    #[allow(dead_code)]
+    enum Message {
+        Quit,
+        Move { x: i32, y: i32 },
+        Write(String),
+        ChangeColor(i32, i32, i32),
+    }
+
+    let msg = Message::ChangeColor(0, 160, 255);
+
+    match msg {
+        Message::Quit => {
+            println!("The Quit variant has no data to destructure.");
+        }
+        Message::Move { x, y } => {
+            println!("Move in the x direction {x} and in the y direction {y}");
+        }
+        Message::Write(text) => {
+            println!("Text message: {text}");
+        }
+        Message::ChangeColor(r, g, b) => {
+            println!("Change color to red {r}, green {g}, and blue {b}");
+        }
+    }
+
+    {
+        // Remaining Parts of a Value with ..
+        #[allow(dead_code)]
+        struct Point {
+            x: i32,
+            y: i32,
+            z: i32,
+        }
+
+        let origin = Point { x: 0, y: 0, z: 0 };
+
+        match origin {
+            Point { x, .. } => println!("x is {x}"),
+        }
+
+        let numbers = (2, 4, 8, 16, 32);
+
+        match numbers {
+            (first, .., last) => {
+                println!("Some numbers: {first}, {last}");
+            }
+        }
+    }
+
+    // Extra Conditionals with Match Guards
+    let num = Some(4);
+
+    match num {
+        Some(x) if x % 2 == 0 => println!("The number {x} is even"),
+        Some(x) => println!("The number {x} is odd"),
+        None => (),
+    }
+
+    // @ Bindings
+    {
+        enum Message {
+            Hello { id: i32 },
+        }
+
+        let msg = Message::Hello { id: 5 };
+
+        match msg {
+            Message::Hello {
+                id: id_variable @ 3..=7,
+            } => println!("Found an id in range: {id_variable}"),
+            Message::Hello { id: 10..=12 } => {
+                println!("Found an id in another range")
+            }
+            Message::Hello { id } => println!("Found some other id: {id}"),
+        }
+    }
+}
+
+fn basic_unsafe() {
+    println!("===== unsafe =====");
+
+    // 1. Dereferencing a Raw Pointer
+    let mut num = 5;
+
+    let r1 = &raw const num;
+    let r2 = &raw mut num;
+
+    unsafe {
+        println!("r1 is: {}", *r1);
+        println!("r2 is: {}", *r2);
+    }
+
+    // 2. Calling an Unsafe Function or Method
+    unsafe fn dangerous() {}
+
+    unsafe {
+        dangerous();
+    }
+
+    unsafe extern "C" {
+        safe fn abs(input: i32) -> i32;
+    }
+
+    println!("Absolute value of -3 according to C: {}", abs(-3));
+
+    // 3. Accessing or Modifying a Mutable Static Variable
+    static mut COUNTER: u32 = 0;
+
+    /// SAFETY: Calling this from more than a single thread at a time is undefined
+    /// behavior, so you *must* guarantee you only call it from a single thread at
+    /// a time.
+    unsafe fn add_to_count(inc: u32) {
+        unsafe {
+            COUNTER += inc;
+        }
+    }
+
+    unsafe {
+        // SAFETY: This is only called from a single thread in `main`.
+        add_to_count(3);
+        println!("COUNTER: {}", *(&raw const COUNTER));
+    }
+
+    // 4. Implementing an Unsafe Trait
+    #[allow(dead_code)]
+    unsafe trait Foo {
+        // methods go here
+    }
+
+    unsafe impl Foo for i32 {
+        // method implementations go here
+    }
+
+    // 5. Accessing Fields of a Union
+}
+
+fn basic_function_pointer_and_closure() {
+    println!("===== function pointer =====");
+
+    fn add_one(x: i32) -> i32 {
+        x + 1
+    }
+
+    fn do_twice(f: fn(i32) -> i32, arg: i32) -> i32 {
+        f(arg) + f(arg)
+    }
+
+    let answer = do_twice(add_one, 5);
+    println!("The answer is: {answer}");
+
+    // return a trait
+    {
+        fn returns_closure() -> impl Fn(i32) -> i32 {
+            |x| x + 1
+        }
+
+        let f = returns_closure();
+        let answer = f(5);
+        println!("The answer from closure is: {answer}");
+    }
+
+    // work with multiple functions with the same signature using trait object
+    fn returns_closure() -> Box<dyn Fn(i32) -> i32> {
+        Box::new(|x| x + 1)
+    }
+
+    fn returns_initialized_closure(init: i32) -> Box<dyn Fn(i32) -> i32> {
+        Box::new(move |x| x + init)
+    }
+
+    let handlers = vec![returns_closure(), returns_initialized_closure(123)];
+    for handler in handlers {
+        let output = handler(5);
+        println!("{output}");
+    }
+}
+
 fn main() {
     basic_variables();
     basic_functions();
@@ -610,4 +1245,12 @@ fn main() {
     basic_generic();
     basic_trait();
     basic_lifetime();
+    basic_closure();
+    basic_iterator();
+    basic_smart_pointers();
+    basic_concurrency();
+    basic_async();
+    basic_patterns();
+    basic_unsafe();
+    basic_function_pointer_and_closure();
 }
