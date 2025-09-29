@@ -572,7 +572,7 @@ __device__ __forceinline__ void mma_m16n8k16(uint2 &d, uint4 a, uint2 b, uint2 c
 }
 
 template <typename T>
-__device__ __forceinline__ constexpr T ce_max(const T &a, const T &b) {
+__device__ __forceinline__ constexpr T cmax(const T &a, const T &b) {
     return a > b ? a : b;
 }
 
@@ -645,12 +645,11 @@ void hgemm_mma_v1(const half *A, const half *B, half *C, int M, int N, int K) {
     CHECK_CUDA(cudaGetLastError());
 }
 
+// definition:
+// https://github.com/NVIDIA/cutlass/blob/c6aeb9179c5f74a0fcdbd28527bf4b6ba8c60752/include/cute/swizzle.hpp#L42-L53
 template <int _2_M, int _2_S>
 __device__ __forceinline__ constexpr int swizzle_permute(int index) {
-    const int group_index = index / _2_M;
-    const int group_y = group_index / _2_S;
-    const int group_x = (group_index ^ group_y) % _2_S;
-    return (group_y * _2_S + group_x) * _2_M + index % _2_M;
+    return index ^ ((index / _2_S) & ((_2_S - 1) * _2_M));
 }
 
 // mma kernel
@@ -698,9 +697,9 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
     uint2 c_frags[NUM_MMA_M][NUM_MMA_N]{};
 
     // swizzle
-    constexpr int SWIZZLE_2_M = 8;                              // 2^3=8 elements as a unit
-    constexpr int SWIZZLE_A_2_S = ce_max(64, BK) / SWIZZLE_2_M; // at least 2^3=8 elements per row
-    constexpr int SWIZZLE_B_2_S = ce_max(64, BN) / SWIZZLE_2_M; // at least 2^3=8 elements per row
+    constexpr int SWIZZLE_2_M = 8;                            // 2^3=8 elements as a unit
+    constexpr int SWIZZLE_A_2_S = cmax(64, BK) / SWIZZLE_2_M; // at least 2^3=8 elements per row
+    constexpr int SWIZZLE_B_2_S = cmax(64, BN) / SWIZZLE_2_M; // at least 2^3=8 elements per row
 
     // ===== fetch block =====
     static_assert((BM * BK) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of A");
@@ -917,9 +916,9 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
     uint4 c_frags[NUM_MMA_M][NUM_MMA_N]{};
 
     // swizzle
-    constexpr int SWIZZLE_2_M = 8;                              // 2^3=8 elements as a unit
-    constexpr int SWIZZLE_A_2_S = ce_max(64, BK) / SWIZZLE_2_M; // at least 2^3=8 elements per row
-    constexpr int SWIZZLE_B_2_S = ce_max(64, BN) / SWIZZLE_2_M; // at least 2^3=8 elements per row
+    constexpr int SWIZZLE_2_M = 8;                            // 2^3=8 elements as a unit
+    constexpr int SWIZZLE_A_2_S = cmax(64, BK) / SWIZZLE_2_M; // at least 2^3=8 elements per row
+    constexpr int SWIZZLE_B_2_S = cmax(64, BN) / SWIZZLE_2_M; // at least 2^3=8 elements per row
 
     // ===== fetch block =====
     static_assert((BM * BK) % (NUM_THREADS * 8) == 0, "unimplemented: corrupted load of A");
@@ -1065,7 +1064,7 @@ __global__ void __launch_bounds__(WX *WY *WARP_SIZE)
 
     static_assert(STAGES * (BM + BN) * BK >= BM * BN, "unimplemented: not enough shared memory");
 
-    constexpr int SWIZZLE_C_2_S = ce_max(64, BN) / SWIZZLE_2_M;
+    constexpr int SWIZZLE_C_2_S = cmax(64, BN) / SWIZZLE_2_M;
     auto swizzle_fn = swizzle_permute<SWIZZLE_2_M, SWIZZLE_C_2_S>;
 
     __syncthreads();
@@ -1393,7 +1392,7 @@ struct KernelRecord {
 std::vector<PerfRecord> perf(int M, int N, int K, const std::string &kernel_name) {
     thrust::device_vector<half> dA(M * K), dB(K * N);
 
-#if 0
+#if 1
     const float rsqrt_K = 1.f / std::sqrt(K);
     uniform_cuda(dA.data().get(), M * K, -rsqrt_K, rsqrt_K);
     uniform_cuda(dB.data().get(), K * N, -rsqrt_K, rsqrt_K);
@@ -1432,9 +1431,9 @@ std::vector<PerfRecord> perf(int M, int N, int K, const std::string &kernel_name
 
         // MAKE_KERNEL(hgemm_mma_v2<128, 128, 32, 2, 2, 3, true, 2>),
 
-        // MAKE_KERNEL(hgemm_mma_v3<128, 256, 32, 4, 2, 4, 8>),
+        MAKE_KERNEL(hgemm_mma_v3<128, 256, 32, 4, 2, 4, 8>),
 
-        MAKE_KERNEL(hgemm_sm90_v1<64, 64, 16>),
+        // MAKE_KERNEL(hgemm_sm90_v1<64, 64, 16>),
 
         // {"hgemm_llm", hgemm},
     };
@@ -1584,7 +1583,7 @@ Args parse_args(int argc, char **argv) {
 int main(int argc, char **argv) {
     Args args = parse_args(argc, argv);
 
-#if 1
+#if 0
     perf(64, 64, 16, "sm90_v1");
     return 0;
 #endif
