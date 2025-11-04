@@ -1,0 +1,4 @@
+[providers.gpt]
+api_base_url = "https://api.openai.com/v1"
+api_key = "sk-"
+model_name = "gpt-4o-mini"
