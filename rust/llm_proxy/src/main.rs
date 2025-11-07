@@ -15,6 +15,7 @@ use reqwest::{
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::{collections::HashMap, sync::Arc};
+use tower_http::trace::TraceLayer;
 use tracing::info;
 
 struct AppState {
@@ -36,7 +37,9 @@ struct AppConfig {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .init();
 
     let config: AppConfig = Config::builder()
         .add_source(File::with_name("config/default"))
@@ -51,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/chat/completions", post(chat_completions))
+        .layer(TraceLayer::new_for_http())
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
@@ -81,9 +85,9 @@ async fn chat_completions(
     );
     headers.insert(CONTENT_TYPE, APPLICATION_JSON.as_ref().parse().unwrap());
 
-    info!("Headers: {:#?}", headers);
+    // info!("Headers: {:#?}", headers);
 
-    info!("Received payload: {:#?}", request);
+    // info!("Received payload: {:#?}", request);
 
     let Ok(upstream_response) = app_state
         .client
@@ -96,7 +100,7 @@ async fn chat_completions(
         return StatusCode::BAD_GATEWAY.into_response();
     };
 
-    info!("Response: {:#?}", upstream_response);
+    // info!("Response: {:#?}", upstream_response);
 
     let status = upstream_response.status();
     let headers = upstream_response.headers().clone();
