@@ -6,6 +6,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
+use clap::Parser;
 use config::{Config, File};
 use mime::APPLICATION_JSON;
 use reqwest::{
@@ -15,8 +16,19 @@ use reqwest::{
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::{collections::HashMap, sync::Arc};
-use tower_http::trace::TraceLayer;
-use tracing::info;
+use tower_http::trace::{self, TraceLayer};
+use tracing::{info, Level};
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Host address to bind the proxy to
+    #[arg(long, default_value = "0.0.0.0")]
+    host: String,
+    /// Port to bind the proxy to
+    #[arg(long, default_value_t = 8080)]
+    port: u16,
+}
 
 struct AppState {
     client: Client,
@@ -38,15 +50,20 @@ struct AppConfig {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
+        .with_target(false)
+        .compact()
         .init();
+
+    let args = Args::parse();
+
+    info!("Starting LLM Proxy on {}:{}", args.host, args.port);
 
     let config: AppConfig = Config::builder()
         .add_source(File::with_name("config/default"))
         .build()?
         .try_deserialize()?;
 
-    let addr = "0.0.0.0:8080";
+    let addr = format!("{}:{}", args.host, args.port);
 
     let client = reqwest::Client::new();
 
@@ -54,7 +71,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/chat/completions", post(chat_completions))
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(trace::DefaultMakeSpan::new().level(Level::INFO))
+                .on_response(trace::DefaultOnResponse::new().level(Level::INFO)),
+        )
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
@@ -84,10 +105,6 @@ async fn chat_completions(
         format!("Bearer {}", provider.api_key).parse().unwrap(),
     );
     headers.insert(CONTENT_TYPE, APPLICATION_JSON.as_ref().parse().unwrap());
-
-    // info!("Headers: {:#?}", headers);
-
-    // info!("Received payload: {:#?}", request);
 
     let Ok(upstream_response) = app_state
         .client
