@@ -11,7 +11,7 @@ services:
       - /etc/passwd:/etc/passwd:ro
       - /etc/group:/etc/group:ro
       - /etc/shadow:/etc/shadow:ro
-      - ${HOST_HOME}:${HOST_HOME}
+      - ${HOME}:${HOME}
     cap_add:
       - ALL
     shm_size: 16gb
@@ -19,8 +19,8 @@ services:
       - bash
       - -c
       - |
-        echo "${HOST_USER}   ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers
-        sed -i 's/^#Port 22$/Port 2222/g' /etc/ssh/sshd_config
+        echo "${USER}   ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers
+        sed -i 's/^#Port 22$$/Port 2222/g' /etc/ssh/sshd_config
         service ssh start
         exec bash
     deploy:
@@ -30,4 +30,4 @@ services:
             - driver: nvidia
               count: 8
               capabilities: [gpu]
-    working_dir: ${HOST_HOME}
+    working_dir: ${HOME}
