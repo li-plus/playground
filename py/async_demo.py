@@ -66,6 +66,32 @@ async def coroutine_pool():
     await asyncio.gather(*workers, return_exceptions=True)
 
 
+async def coroutine_pool_with_task_group():
+    num_workers = 10
+    num_tasks = 100
+
+    async def worker_fn(worker_id: int, queue: asyncio.Queue):
+        while True:
+            delay = await queue.get()
+            try:
+                if delay is None:
+                    break
+                await asyncio.sleep(delay)
+                print(f"[worker {worker_id}] worked for {delay:.3f}s")
+            finally:
+                queue.task_done()
+
+    queue = asyncio.Queue()
+    for _ in range(num_tasks):
+        await queue.put(random.random())
+    for _ in range(num_workers):
+        await queue.put(None)
+
+    async with asyncio.TaskGroup() as tg:
+        for i in range(num_workers):
+            tg.create_task(worker_fn(i, queue))
+
+
 async def streaming_processing():
     num_workers = 10
     num_tasks = 100
@@ -180,9 +206,10 @@ if __name__ == "__main__":
     # asyncio.run(hello_world())
     # asyncio.run(work_concurrent())
     # asyncio.run(coroutine_pool())
+    asyncio.run(coroutine_pool_with_task_group())
     # asyncio.run(streaming_processing())
     # asyncio.run(sync_to_async())
     # asyncio.run(concurrent_to_async())
-    asyncio.run(await_with_timeout())
+    # asyncio.run(await_with_timeout())
     # asyncio.run(async_ray_task())
     # asyncio.run(async_ray_actor())
