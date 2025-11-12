@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::{stdout, Write};
 use tokio;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ChatRequest {
@@ -164,6 +165,10 @@ async fn chat(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
 
     const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
