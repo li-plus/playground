@@ -67,7 +67,6 @@ def main():
     set_seed(12345)
 
     dist.init_process_group(backend="nccl")
-    rank = dist.get_rank()
     world_size = dist.get_world_size()
 
     local_rank = int(os.getenv("LOCAL_RANK", "0"))  # single node

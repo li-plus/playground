@@ -8,6 +8,7 @@ import concurrent.futures
 import logging
 import os
 import random
+import sys
 import threading
 import time
 
@@ -202,14 +203,25 @@ async def async_ray_actor():
     await asyncio.gather(worker.run.remote(3), worker.run.remote(3), return_exceptions=True)
 
 
+async def async_subprocess():
+    proc = await asyncio.subprocess.create_subprocess_exec(sys.executable, "-c", "print('hello')")
+    return_code = await proc.wait()
+    print(f"create_subprocess_exec: {return_code=}")
+
+    proc = await asyncio.subprocess.create_subprocess_shell("echo hello")
+    return_code = await proc.wait()
+    print(f"create_subprocess_shell: {return_code=}")
+
+
 if __name__ == "__main__":
     # asyncio.run(hello_world())
     # asyncio.run(work_concurrent())
     # asyncio.run(coroutine_pool())
-    asyncio.run(coroutine_pool_with_task_group())
+    # asyncio.run(coroutine_pool_with_task_group())
     # asyncio.run(streaming_processing())
     # asyncio.run(sync_to_async())
     # asyncio.run(concurrent_to_async())
     # asyncio.run(await_with_timeout())
     # asyncio.run(async_ray_task())
     # asyncio.run(async_ray_actor())
+    asyncio.run(async_subprocess())

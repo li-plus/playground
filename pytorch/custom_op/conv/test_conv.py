@@ -1,6 +1,5 @@
 import pytest
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.utils.cpp_extension
 from torch.utils.benchmark import Timer
 

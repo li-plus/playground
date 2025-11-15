@@ -156,7 +156,6 @@ def main():
     set_seed(12345)
 
     dist.init_process_group(backend="nccl")
-    rank = dist.get_rank()
     world_size = dist.get_world_size()
 
     local_rank = int(os.getenv("LOCAL_RANK", "0"))  # single node
@@ -201,7 +200,6 @@ def main():
         layer.self_attn.num_heads //= world_size
         layer.self_attn.num_key_value_heads //= world_size
 
-    old_llama_decoder_layer_forward = LlamaDecoderLayer.forward
     LlamaDecoderLayer.forward = llama_decoder_layer_forward
 
     sp_size = input_ids.shape[0] // group.size()

@@ -9,5 +9,5 @@ npx tsc --init
 
 Run:
 ```sh
-npx ts-node async_vs_callback.ts
+npx tsx async_vs_callback.ts
 ```

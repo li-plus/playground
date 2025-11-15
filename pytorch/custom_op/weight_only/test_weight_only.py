@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import weight_only
+import weight_only  # noqa: F401
 from torch.utils.benchmark import Timer
 
 

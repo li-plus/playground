@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 from safetensors import safe_open
-from safetensors.torch import save_file
+from safetensors.torch import save_file  # noqa: F401
 from torch.utils.benchmark import Timer
 
 

@@ -47,7 +47,7 @@ def nested_context():
 
     print("=" * 50)
     with switch_ctx(ctx_type="a"), switch_ctx(ctx_type="b"):
-        print(f"work within ctx")
+        print("work within ctx")
 
 
 def reuse_context():
