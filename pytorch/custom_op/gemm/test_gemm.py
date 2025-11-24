@@ -8,7 +8,7 @@ extra_cuda_cflags = ["-O0", "-lineinfo"] if debug else ["-O3"]
 
 gemm_ops = torch.utils.cpp_extension.load(
     name="gemm_ops",
-    sources=["gemm_ops.cu"],
+    sources=["gemm_ops.cu", "gemm_ops.cpp"],
     extra_cflags=extra_cflags,
     extra_cuda_cflags=extra_cuda_cflags,
     build_directory="build/",

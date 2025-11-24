@@ -28,6 +28,15 @@ all: $(TARGETS)
 $(TARGET_DIR):
 	mkdir -p $(TARGET_DIR)
 
+hgemm_llm: hgemm_llm.cu hgemm.cu common.h | $(TARGET_DIR)
+	$(NVCC) $(CUDAFLAGS) $(INCLUDES) $(LIBRARIES) $< hgemm.cu -o $@
+
+hgemm_llm_ptx: hgemm_llm.cu common.h | $(TARGET_DIR)
+	$(NVCC) $(CUDAFLAGS) $(INCLUDES) $(LIBRARIES) -ptx $< -o hgemm_llm.ptx
+
+hgemm_ptx: hgemm.cu common.h | $(TARGET_DIR)
+	$(NVCC) $(CUDAFLAGS) $(INCLUDES) $(LIBRARIES) -ptx $< -o hgemm.ptx
+
 $(TARGET_DIR)/%: %.cu common.h | $(TARGET_DIR)
 	$(NVCC) $(CUDAFLAGS) $(INCLUDES) $(LIBRARIES) $< -o $@
 

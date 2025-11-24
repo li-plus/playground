@@ -1,5 +1,5 @@
 """
-Gradient Checkpoint: 
+Gradient Checkpoint:
 * forward: run forward function without grad
 * backward: run forward with grad and then run backward
 """

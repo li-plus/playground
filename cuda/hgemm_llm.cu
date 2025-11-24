@@ -101,10 +101,25 @@ __device__ __forceinline__ int swizzle_B(int linear_offset) {
     return physical_offset;
 }
 
+__device__ __forceinline__ int swizzle_C(int linear_offset) {
+    // C matrix: 128x256, group 8 elements as unit, width = 256/8 = 32 units per row
+    int logical_row = linear_offset / 256;          // Logical row
+    int element_in_row = linear_offset % 256;       // Element within row
+    int logical_unit_col = element_in_row / 8;      // Unit column (0-31)
+    int element_in_unit = element_in_row % 8;       // Element within unit (0-7)
+    
+    int physical_unit_col = logical_unit_col ^ (logical_row % 32);  // XOR with row mod 32
+    physical_unit_col = physical_unit_col % 32;     // Ensure within range [0-31]
+    
+    int physical_offset = logical_row * 256 + physical_unit_col * 8 + element_in_unit;
+    return physical_offset;
+}
+
 __global__ void hgemm_kernel(const half *A, const half *B, half *C, int M, int N, int K) {
-    // Dynamic shared memory allocation for 4-stage prefetching
+    // Dynamic shared memory allocation for 4-stage prefetching only
     // A: 4 * 128 * 32, B: 4 * 32 * 256
     // Total: 4 * (128*32 + 32*256) * sizeof(half) = 4 * (4096 + 8192) * 2 = 98304 bytes = 96KB
+    // Note: C fragment (128*256 = 32768 elements = 64KB) will reuse A/B shared memory after computation
     extern __shared__ half smem[];
     
     // Convert 1D shared memory to 2D arrays
@@ -143,6 +158,10 @@ __global__ void hgemm_kernel(const half *A, const half *B, half *C, int M, int N
     // Initialize accumulators for 32 MMA operations using default initialization
     uint2 rC[32] = {};  // Default initialize to zero
     
+    // Persistent fragment registers for double buffering
+    uint4 rA_fragments[2][4];  // [buffer][tile_m] - 2 buffers for A fragments
+    uint4 rB_fragments[2][4];  // [buffer][tile_n] - 2 buffers for B fragments
+    
     // Helper lambda to load A and B blocks for a given k_block and stage
     auto load_GEMM_tile = [&](int k_block, int stage) {
         // Load A block (128x32) into shared memory using cp.async with swizzling
@@ -178,14 +197,10 @@ __global__ void hgemm_kernel(const half *A, const half *B, half *C, int M, int N
         cp_async_commit_group();
     };
     
-    // Helper lambda to perform MMA operations for a given stage
-    auto compute_GEMM_tile = [&](int stage, bool wait_and_prefetch = false, int next_stage = -1) {
-        // Double buffer for A and B fragments (2x fragment registers)
-        uint4 rA_fragments[2][4];  // [buffer][tile_m] - 2 buffers for A fragments
-        uint4 rB_fragments[2][4];  // [buffer][tile_n] - 2 buffers for B fragments
+    // Helper lambda to load single k_sub fragment
+    auto load_fragment = [&](int stage, int k_sub, int buffer) {
+        int k_offset = k_sub * 16;
         
-        // Pre-load fragments for k_sub=0 into buffer 0
-        int k_offset = 0;
         #pragma unroll
         for (int tile_m = 0; tile_m < 4; tile_m++) {
             int A_tile_row = warp_row * 64 + tile_m * 16;
@@ -196,7 +211,7 @@ __global__ void hgemm_kernel(const half *A, const half *B, half *C, int M, int N
             int sA_swizzled = swizzle_A(sA_linear);
             const half* sA_addr = &sA[stage][sA_swizzled];
             
-            rA_fragments[0][tile_m] = ldmatrix_x4_m8n8(sA_addr);
+            rA_fragments[buffer][tile_m] = ldmatrix_x4_m8n8(sA_addr);
         }
         
         #pragma unroll
@@ -209,76 +224,32 @@ __global__ void hgemm_kernel(const half *A, const half *B, half *C, int M, int N
             int sB_swizzled = swizzle_B(sB_linear);
             const half* sB_addr = &sB[stage][sB_swizzled];
             
-            rB_fragments[0][tile_n] = ldmatrix_x4_m8n8_trans(sB_addr);
+            rB_fragments[buffer][tile_n] = ldmatrix_x4_m8n8_trans(sB_addr);
         }
-        
+    };
+    
+    // Helper lambda to perform MMA operations for a given stage
+    auto compute_GEMM_tile = [&](int stage, int next_stage) {
         // Process both K=16 slices within the K=32 block
         #pragma unroll
         for (int k_sub = 0; k_sub < 2; k_sub++) {
             int current_buffer = k_sub % 2;
-            int next_buffer = (k_sub + 1) % 2;
             
-            // Prefetch logic
-            if (k_sub == 0) {
-                // Prefetch k_sub=1 from current stage
-                int next_k_offset = 16;
-                #pragma unroll
-                for (int tile_m = 0; tile_m < 4; tile_m++) {
-                    int A_tile_row = warp_row * 64 + tile_m * 16;
-                    int lane_group = lane_id / 16;
-                    int lane_in_group = lane_id % 16;
-                    
-                    int sA_linear = (A_tile_row + lane_in_group) * 32 + next_k_offset + lane_group * 8;
-                    int sA_swizzled = swizzle_A(sA_linear);
-                    const half* sA_addr = &sA[stage][sA_swizzled];
-                    
-                    rA_fragments[next_buffer][tile_m] = ldmatrix_x4_m8n8(sA_addr);
-                }
-                
-                #pragma unroll
-                for (int tile_n = 0; tile_n < 4; tile_n++) {
-                    int B_tile_col = warp_col * 64 + tile_n * 16;
-                    int lane_group = lane_id / 16;
-                    int lane_in_group = lane_id % 16;
-                    
-                    int sB_linear = (next_k_offset + lane_in_group) * 256 + B_tile_col + lane_group * 8;
-                    int sB_swizzled = swizzle_B(sB_linear);
-                    const half* sB_addr = &sB[stage][sB_swizzled];
-                    
-                    rB_fragments[next_buffer][tile_n] = ldmatrix_x4_m8n8_trans(sB_addr);
-                }
-            } else if (wait_and_prefetch && next_stage >= 0) {
-                // For k_sub=1: wait for next cp.async and prefetch k_sub=0 from next stage
+            // Unified prefetch logic - always load a fragment
+            // k_sub=0: Load k_sub=1 from current stage
+            // k_sub=1: Wait, sync, and load k_sub=0 from next stage
+            int prefetch_stage = (k_sub == 0) ? stage : next_stage;
+            int prefetch_k_sub = (k_sub == 0) ? 1 : 0;
+            int prefetch_buffer = (k_sub == 0) ? 1 : 0;
+            
+            // Conditional wait and sync only for k_sub=1
+            if (k_sub == 1) {
                 cp_async_wait_group_2();
                 __syncthreads();
-                
-                int next_k_offset = 0;  // k_sub=0 from next stage
-                #pragma unroll
-                for (int tile_m = 0; tile_m < 4; tile_m++) {
-                    int A_tile_row = warp_row * 64 + tile_m * 16;
-                    int lane_group = lane_id / 16;
-                    int lane_in_group = lane_id % 16;
-                    
-                    int sA_linear = (A_tile_row + lane_in_group) * 32 + next_k_offset + lane_group * 8;
-                    int sA_swizzled = swizzle_A(sA_linear);
-                    const half* sA_addr = &sA[next_stage][sA_swizzled];
-                    
-                    rA_fragments[0][tile_m] = ldmatrix_x4_m8n8(sA_addr);  // Load into buffer 0 for next iteration
-                }
-                
-                #pragma unroll
-                for (int tile_n = 0; tile_n < 4; tile_n++) {
-                    int B_tile_col = warp_col * 64 + tile_n * 16;
-                    int lane_group = lane_id / 16;
-                    int lane_in_group = lane_id % 16;
-                    
-                    int sB_linear = (next_k_offset + lane_in_group) * 256 + B_tile_col + lane_group * 8;
-                    int sB_swizzled = swizzle_B(sB_linear);
-                    const half* sB_addr = &sB[next_stage][sB_swizzled];
-                    
-                    rB_fragments[0][tile_n] = ldmatrix_x4_m8n8_trans(sB_addr);  // Load into buffer 0 for next iteration
-                }
             }
+            
+            // Always load fragment (unified for both k_sub cases)
+            load_fragment(prefetch_stage, prefetch_k_sub, prefetch_buffer);
             
             // Perform all MMA operations using current buffer
             int mma_idx = 0;
@@ -305,10 +276,13 @@ __global__ void hgemm_kernel(const half *A, const half *B, half *C, int M, int N
     #pragma unroll
     for (int prefetch_k = 0; prefetch_k < 3; prefetch_k++) {
         int k_block = prefetch_k * 32;
-        if (k_block < K) {
-            load_GEMM_tile(k_block, prefetch_k % 4);
-        }
+        load_GEMM_tile(k_block, prefetch_k % 4);
     }
+    
+    // Pre-load very first fragment (k=0, k_sub=0) outside the main loop
+    cp_async_wait_group_2();  // Wait for first stage to be ready
+    __syncthreads();
+    load_fragment(0, 0, 0);  // Load k=0, k_sub=0 into buffer 0
     
     // Main loop starting from k=3, overlapping computation and memory access
     for (int k = 3; k * 32 < K; k++) {
@@ -316,75 +290,119 @@ __global__ void hgemm_kernel(const half *A, const half *B, half *C, int M, int N
         int compute_stage = (k - 3) % 4;  // Stage to compute (k-3)
         int load_stage = k % 4;           // Stage to load current k
         
-        // Issue cp.async for current k (no wait needed - handled in compute_GEMM_tile)
-        if (k_block < K) {
-            load_GEMM_tile(k_block, load_stage);
-        }
+        // Issue cp.async for current k
+        load_GEMM_tile(k_block, load_stage);
         
-        // Perform MMA for k-3 with cross-stage prefetching
+        // Perform MMA for k-3 with unified next stage calculation
         int next_compute_stage = (k - 2) % 4;  // Stage for k-2 (next iteration)
-        compute_GEMM_tile(compute_stage, true, next_compute_stage);
+        compute_GEMM_tile(compute_stage, next_compute_stage);
     }
     
-    // Finish remaining 3 MMA operations
+    // Finish remaining 3 MMA operations using modulo and division
     cp_async_wait_group_0();  // Wait for all remaining cp.async operations
     __syncthreads();
     
+    int total_k_stages = (K + 31) / 32;  // Total number of k stages
     #pragma unroll
     for (int remaining = 0; remaining < 3; remaining++) {
-        int k = (K / 32) - 3 + remaining;  // Calculate the k index for remaining stages
-        if (k >= 0 && k * 32 < K) {
-            int compute_stage = k % 4;
-            bool is_last_two = (remaining >= 1);  // Last 2 iterations don't prefetch
-            int next_stage = is_last_two ? -1 : ((k + 1) % 4);
-            compute_GEMM_tile(compute_stage, !is_last_two, next_stage);
-        }
+        int k = total_k_stages - 3 + remaining;  // Current k stage index
+        int compute_stage = k % 4;
+        // Unified next stage calculation using modulo (handles boundary automatically)
+        int next_k = total_k_stages - 3 + remaining + 1;
+        int next_stage = next_k % 4;  // Will wrap around correctly
+        
+        compute_GEMM_tile(compute_stage, next_stage);
     }
     
-    // Store results back to global memory using half2 for adjacent elements
+    // All computation complete - now reuse shared memory for C fragment storage
+    __syncthreads();  // Ensure all computation is complete before reusing shared memory
+    
+    // Reuse A/B shared memory for C fragment buffer (A+B = 96KB > C = 64KB)
+    half (*sC) = smem;  // Reuse beginning of shared memory for C fragment: 128x256
+    
+    // Store results to shared memory first, then to global memory
     int mma_idx = 0;
     
+    // Store MMA results to shared C buffer with swizzling
     #pragma unroll
     for (int tile_m = 0; tile_m < 4; tile_m++) {
         #pragma unroll
         for (int tile_n = 0; tile_n < 4; tile_n++) {
-            // Calculate base position for this tile
-            int tile_row_start = C_row_start + tile_m * 16;
-            int tile_col_start = C_col_start + tile_n * 16;
+            // Calculate warp-local tile position
+            int tile_row_start = warp_row * 64 + tile_m * 16;
+            int tile_col_start = warp_col * 64 + tile_n * 16;
             
             int quad = lane_id / 4;
             int lane_in_quad = lane_id % 4;
             int base_row = tile_row_start + quad;
             
-            // Store left 16x8 fragment using half2
+            // Store to shared memory using half2 for efficiency with swizzling
             half* output_ptr_left = (half*)&rC[mma_idx];
-            int base_col_left = tile_col_start + lane_in_quad * 2;
-            
-            half2* C_ptr_left_0 = (half2*)&C[base_row * N + base_col_left];
-            half2* C_ptr_left_8 = (half2*)&C[(base_row + 8) * N + base_col_left];
-            
-            *C_ptr_left_0 = *((half2*)&output_ptr_left[0]);  // Store elements 0,1
-            *C_ptr_left_8 = *((half2*)&output_ptr_left[2]);  // Store elements 2,3
-            
-            // Store right 16x8 fragment using half2
             half* output_ptr_right = (half*)&rC[mma_idx + 1];
+            
+            int base_col_left = tile_col_start + lane_in_quad * 2;
             int base_col_right = tile_col_start + 8 + lane_in_quad * 2;
             
-            half2* C_ptr_right_0 = (half2*)&C[base_row * N + base_col_right];
-            half2* C_ptr_right_8 = (half2*)&C[(base_row + 8) * N + base_col_right];
+            // Apply swizzling to shared memory addresses
+            int sC_linear_left_0 = base_row * 256 + base_col_left;
+            int sC_linear_left_8 = (base_row + 8) * 256 + base_col_left;
+            int sC_linear_right_0 = base_row * 256 + base_col_right;
+            int sC_linear_right_8 = (base_row + 8) * 256 + base_col_right;
             
-            *C_ptr_right_0 = *((half2*)&output_ptr_right[0]);  // Store elements 0,1
-            *C_ptr_right_8 = *((half2*)&output_ptr_right[2]);  // Store elements 2,3
+            int sC_swizzled_left_0 = swizzle_C(sC_linear_left_0);
+            int sC_swizzled_left_8 = swizzle_C(sC_linear_left_8);
+            int sC_swizzled_right_0 = swizzle_C(sC_linear_right_0);
+            int sC_swizzled_right_8 = swizzle_C(sC_linear_right_8);
+            
+            // Store left 16x8 fragment to shared memory with swizzling
+            half2* sC_ptr_left_0 = (half2*)&sC[sC_swizzled_left_0];
+            half2* sC_ptr_left_8 = (half2*)&sC[sC_swizzled_left_8];
+            
+            *sC_ptr_left_0 = *((half2*)&output_ptr_left[0]);
+            *sC_ptr_left_8 = *((half2*)&output_ptr_left[2]);
+            
+            // Store right 16x8 fragment to shared memory with swizzling
+            half2* sC_ptr_right_0 = (half2*)&sC[sC_swizzled_right_0];
+            half2* sC_ptr_right_8 = (half2*)&sC[sC_swizzled_right_8];
+            
+            *sC_ptr_right_0 = *((half2*)&output_ptr_right[0]);
+            *sC_ptr_right_8 = *((half2*)&output_ptr_right[2]);
             
             mma_idx += 2;
+        }
+    }
+    
+    __syncthreads();  // Ensure all warps finish storing to shared memory
+    
+    // Cooperatively store from shared memory to global memory with swizzling
+    // 256 threads, each stores 128 elements (16 float4), total 32768 elements = 128x256
+    #pragma unroll
+    for (int store_iter = 0; store_iter < 16; store_iter++) {
+        int sC_row = (tid / 32) + store_iter * 8;  // 8 rows per iteration, 32 threads per row
+        int sC_col = (tid % 32) * 8;               // Each thread stores 8 consecutive elements
+        
+        int global_row = block_row * 128 + sC_row;
+        int global_col = block_col * 256 + sC_col;
+        
+        if (global_row < M && global_col + 7 < N) {
+            // Apply swizzling to read from shared memory
+            int sC_linear = sC_row * 256 + sC_col;
+            int sC_swizzled = swizzle_C(sC_linear);
+            
+            // Use float4 for vectorized store (8 half values = 16 bytes = 1 float4)
+            float4* global_ptr = (float4*)&C[global_row * N + global_col];
+            float4* shared_ptr = (float4*)&sC[sC_swizzled];
+            
+            *global_ptr = *shared_ptr;
         }
     }
 }
 
 void hgemm(const half *A, const half *B, half *C, int M, int N, int K) {
-    // Calculate required shared memory size for 4-stage prefetching
+    // Calculate required shared memory size for 4-stage prefetching only
     // A: 4 * 128 * 32, B: 4 * 32 * 256
     // Total: 4 * (128*32 + 32*256) * sizeof(half) = 4 * (4096 + 8192) * 2 = 98304 bytes = 96KB
+    // Note: C fragment (128*256 = 64KB) reuses this shared memory after computation
     const int smem_size = 4 * (128 * 32 + 32 * 256) * sizeof(half);  // 96KB
     
     // Set maximum shared memory size for the kernel
