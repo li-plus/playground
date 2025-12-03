@@ -204,13 +204,29 @@ async def async_ray_actor():
 
 
 async def async_subprocess():
+    # create_subprocess_exec
     proc = await asyncio.subprocess.create_subprocess_exec(sys.executable, "-c", "print('hello')")
     return_code = await proc.wait()
     print(f"create_subprocess_exec: {return_code=}")
 
+    # create_subprocess_shell
     proc = await asyncio.subprocess.create_subprocess_shell("echo hello")
     return_code = await proc.wait()
     print(f"create_subprocess_shell: {return_code=}")
+
+    # piped stdout and stderr
+    proc = await asyncio.subprocess.create_subprocess_exec(
+        sys.executable, "-c", "print('hello')", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await proc.communicate()
+    print(f"communicate: ret={proc.returncode}, stdout={stdout.decode().strip()!r}, stderr={stderr.decode().strip()!r}")
+
+    # exception
+    proc = await asyncio.subprocess.create_subprocess_exec(
+        sys.executable, "-c", "__ERROR__", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await proc.communicate()
+    print(f"exception: ret={proc.returncode}, stdout={stdout.decode().strip()!r}, stderr={stderr.decode().strip()!r}")
 
 
 if __name__ == "__main__":
