@@ -5,3 +5,7 @@ lint:
 	isort hf/ pytorch/ py/ ray/
 	black hf/ pytorch/ py/ ray/ --verbose --line-length 120
 	clang-format -i **/*.cu
+
+style:
+	ruff check --fix
+	ruff format
