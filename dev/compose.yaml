@@ -1,6 +1,6 @@
 services:
   dev:
-    image: hub.byted.org/base/lab.pytorch2:2.7.1_abi.py311.cu126.post1
+    image: nvidia/cuda:12.2.0-devel-ubuntu20.04
     # build: .
     stdin_open: true    # -i
     tty: true           # -t
@@ -11,8 +11,6 @@ services:
       - /etc/passwd:/etc/passwd:ro
       - /etc/group:/etc/group:ro
       - /etc/shadow:/etc/shadow:ro
-      - /opt/tiger:/opt/tiger
-      - /data01/ljh:/data01/ljh
       - ${HOME}:${HOME}
     cap_add:
       - ALL
@@ -32,4 +30,4 @@ services:
             - driver: nvidia
               count: 8
               capabilities: [gpu]
-    working_dir: /data01/ljh
+    working_dir: ${HOME}
