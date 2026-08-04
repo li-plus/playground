@@ -4,7 +4,7 @@ allow-lan: true
 log-level: info
 ipv6: true
 external-controller: 0.0.0.0:9097
-secret: ''
+secret: 'admin'
 unified-delay: true
 dns:
   default-nameserver:
@@ -226,7 +226,7 @@ rule-providers:
     path: ./ruleset/applications.yaml
     interval: 86400
 
-  # https://github.com/blackmatrix7/ios_rule_script
+  # https://github.com/blackmatrix7/ios_rule_script/tree/master/rule/Clash
   nintendo:
     type: http
     behavior: classical
@@ -256,6 +256,13 @@ rule-providers:
     path: ./ruleset/gemini.yaml
     interval: 86400
 
+  cursor:
+    type: http
+    behavior: classical
+    url: "https://raw.githubusercontent.com/SkywalkerJi/Clash-Rules/master/AI/Cursor.yaml"
+    path: ./ruleset/cursor.yaml
+    interval: 86400
+
 rules:
   - RULE-SET,applications,DIRECT
   - DOMAIN,clash.razord.top,DIRECT
@@ -265,6 +272,7 @@ rules:
   - RULE-SET,anthropic,AI
   - RULE-SET,openai,AI
   - RULE-SET,gemini,AI
+  - RULE-SET,cursor,AI
   - RULE-SET,nintendo,PROXY
   - RULE-SET,google,PROXY
   - RULE-SET,tld-not-cn,PROXY
